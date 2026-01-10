@@ -1,0 +1,23 @@
+dataset:
+  data_path: data/multiclass/statlog+shuttle/statlog+shuttle.train.csv
+  meta_path: data/multiclass/statlog+shuttle/statlog+shuttle.yaml
+  batch_size: 128
+  seed: 42
+  normalize_numeric: true
+  one_hot_categoricals: true
+  client_frac: 0.10
+  train_frac: 0.70
+  val_frac: 0.15
+
+trainer:
+  optimizer: adamw
+  epochs: 100
+  lr: 0.01
+  weight_decay: 0.0001
+  warmup_pct: 0.10
+  min_lr_scale: 0.1
+  # optional: set to a subfolder name or absolute path; relative paths resolve under the dataset directory
+  checkpoint_dir: checkpoints
+
+model:
+  params: {}
