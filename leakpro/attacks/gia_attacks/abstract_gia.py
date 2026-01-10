@@ -97,10 +97,14 @@ class AbstractGIA(AbstractAttack):
 
     def generic_attack_loop(self: Self, configs:dict, gradient_closure: Callable, at_iterations: int,
                             reconstruction: Tensor, data_mean: Tensor, data_std: Tensor, attack_lr: float,
-                            median_pooling: bool, client_loader: DataLoader, reconstruction_loader: DataLoader
+                            median_pooling: bool, client_loader: DataLoader, reconstruction_loader: DataLoader,
+                            is_tabular: bool = False
                             ) -> Generator[tuple[int, Tensor, GIAResults]]:
         """Generic attack loop for GIA's."""
         optimizer = torch.optim.Adam([reconstruction], lr=attack_lr)
+        # Initialize best reconstruction fallback
+        self.best_reconstruction = deepcopy(reconstruction_loader)
+        self.final_best = deepcopy(reconstruction_loader)
         # reduce LR every 1/3 of total iterations
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
                                                             milestones=[at_iterations // 2.667,
@@ -114,12 +118,12 @@ class AbstractGIA(AbstractAttack):
                 loss = optimizer.step(closure)
                 scheduler.step()
                 with torch.no_grad():
-                    # force pixels to be in reasonable ranges
-                    reconstruction.data = torch.max(
-                        torch.min(reconstruction, (1 - data_mean) / data_std), -data_mean / data_std
-                        )
-                    if (i +1) % 500 == 0 and median_pooling:
-                        reconstruction.data = MedianPool2d(kernel_size=3, stride=1, padding=1, same=False)(reconstruction)
+                    if not is_tabular:
+                        reconstruction.data = torch.max(
+                            torch.min(reconstruction, (1 - data_mean) / data_std), -data_mean / data_std
+                            )
+                        if (i +1) % 500 == 0 and median_pooling:
+                            reconstruction.data = MedianPool2d(kernel_size=3, stride=1, padding=1, same=False)(reconstruction)
                 # Choose image who has given least loss
                 if loss < self.best_loss:
                     self.best_loss = loss
@@ -129,21 +133,38 @@ class AbstractGIA(AbstractAttack):
                     logger.info(f"New best loss: {loss} on round: {i}")
                 if i % 250 == 0:
                     logger.info(f"Iteration {i}, loss {loss}")
-                    ssim = dataloaders_ssim_ignite(client_loader, self.best_reconstruction)
-                    if ssim > self.best_sim:
-                        self.final_best = deepcopy(self.best_reconstruction)
-                        self.best_sim = ssim
-                    logger.info(f"best ssim: {self.best_sim}")
-                    yield i, self.best_sim, None
+                    if is_tabular:
+                        # For tabular, track the best loss as similarity proxy
+                        yield i, -float(loss), None
+                    else:
+                        ssim = dataloaders_ssim_ignite(client_loader, self.best_reconstruction)
+                        if ssim > self.best_sim:
+                            self.final_best = deepcopy(self.best_reconstruction)
+                            self.best_sim = ssim
+                        logger.info(f"best ssim: {self.best_sim}")
+                        yield i, self.best_sim, None
         except Exception as e:
             logger.info(f"Attack stopped due to {e}. \
                         Saving results.")
-        ssim_score = dataloaders_ssim_ignite(client_loader, self.final_best)
-        psnr_score = dataloaders_psnr(client_loader, self.final_best)
-        gia_result = GIAResults(client_loader, self.final_best,
-                          psnr_score=psnr_score, ssim_score=ssim_score,
-                          data_mean=data_mean, data_std=data_std, config=configs)
-        yield i, self.best_sim, gia_result
+        if is_tabular:
+            # Compute simple tabular reconstruction metrics
+            orig_tensor = torch.cat([batch[0] for batch in client_loader], dim=0)
+            recon_tensor = torch.cat([batch[0] for batch in self.best_reconstruction], dim=0)
+            mse = torch.mean((orig_tensor - recon_tensor) ** 2).item()
+            mae = torch.mean(torch.abs(orig_tensor - recon_tensor)).item()
+            rmse = mse ** 0.5
+            gia_result = GIAResults(client_loader, self.best_reconstruction,
+                                    psnr_score=None, ssim_score=None,
+                                    data_mean=None, data_std=None, config=configs,
+                                    images=False, rmse_score=rmse, mae_score=mae, is_tabular=True)
+            yield i, -self.best_loss, gia_result
+        else:
+            ssim_score = dataloaders_ssim_ignite(client_loader, self.final_best)
+            psnr_score = dataloaders_psnr(client_loader, self.final_best)
+            gia_result = GIAResults(client_loader, self.final_best,
+                              psnr_score=psnr_score, ssim_score=ssim_score,
+                              data_mean=data_mean, data_std=data_std, config=configs)
+            yield i, self.best_sim, gia_result
 
 
     def generic_attack_loop_text(self: Self, configs:dict, gradient_closure: Callable, at_iterations: int,

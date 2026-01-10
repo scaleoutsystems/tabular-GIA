@@ -113,6 +113,42 @@ class GiaImageYoloExtension(GiaDataModalityExtension):
         return org_loader, original, reconstruction, labels, reconstruction_loader
 
 
+class GiaTabularExtension(GiaDataModalityExtension):
+    """Tabular extension for GIA (minimal, tensor-only)."""
+
+    def get_at_data(self: Self, client_loader: DataLoader) -> tuple[DataLoader, Tensor, Tensor, list, DataLoader]:
+        """Create reconstruction tensors matching tabular samples and labels.
+
+        Assumes client_loader yields (features, labels) where features are numeric tensors.
+        """
+        batch_size = client_loader.batch_size or 32
+
+        originals = []
+        labels: list = []
+        for batch in client_loader:
+            if isinstance(batch, (tuple, list)) and len(batch) >= 2:
+                feats, lbls = batch[0], batch[1]
+            else:  # fallback: treat entire batch as features with dummy labels
+                feats, lbls = batch, torch.zeros(len(batch))
+
+            originals.append(feats.clone())
+            if isinstance(lbls, Tensor):
+                labels.extend(deepcopy(lbls))
+            else:
+                labels.extend(deepcopy(lbls))
+
+        original = torch.cat(originals, dim=0)
+        reconstruction = torch.randn_like(original)
+
+        org_dataset = CustomTensorDataset(original, labels)
+        org_loader = DataLoader(org_dataset, batch_size=batch_size, shuffle=True)
+
+        reconstruction_dataset = CustomTensorDataset(reconstruction, labels)
+        reconstruction_loader = DataLoader(reconstruction_dataset, batch_size=batch_size, shuffle=True)
+
+        return org_loader, original, reconstruction, labels, reconstruction_loader
+
+
 def get_meanstd(trainset: Dataset, axis_to_reduce: tuple=(-2,-1)) -> tuple[Tensor, Tensor]:
     """Get mean and std of a dataset."""
     cc = cat([trainset[i][0].unsqueeze(0) for i in range(len(trainset))], dim=0)
