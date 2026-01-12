@@ -1,15 +1,22 @@
 """Minimal tabular GIA demo using a pre-trained global model."""
 
+import sys
+import os
 import argparse
 import logging
 from pathlib import Path
-
+import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
-from leakpro.attacks.gia_attacks.invertinggradients import InvertingConfig, InvertingGradients
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
+
 from leakpro.fl_utils.data_utils import GiaTabularExtension
 from leakpro.utils.seed import seed_everything
+
+# Local imports
+from tabular_gia_attack import TabularGIA
+from tabular_metrics import evaluate_reconstruction, count_constraint_violations
 
 from train import train_global_model
 from model import TabularMLP
@@ -19,6 +26,53 @@ from tabular import get_tabular_loaders, load_tabular_config
 logger = logging.getLogger(__name__)
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
+
+
+def compute_prior_stats(loader: DataLoader, encoder_meta: dict) -> dict:
+    """Compute categorical frequencies from a loader (Prior Knowledge)."""
+    cat_cols = encoder_meta.get('cat_cols', [])
+    cat_frequencies = {}
+    
+    if not cat_cols:
+        return {}
+    
+    logger.info("Computing prior statistics (frequencies) from training data...")
+    
+    num_cols = encoder_meta.get('num_cols', [])
+    cat_categories = encoder_meta.get('cat_categories', {})
+    
+    # Initialize counts
+    counts = {col: np.zeros(len(cat_categories.get(col, []))) for col in cat_cols}
+    total_samples = 0
+    
+    start_idx = len(num_cols)
+    
+    for batch in loader:
+        features = batch[0] # [B, D]
+        features_np = features.numpy()
+        total_samples += features.shape[0]
+        
+        curr = start_idx
+        for col in cat_cols:
+            cats = cat_categories.get(col, [])
+            n_cats = len(cats)
+            indices = list(range(curr, curr + n_cats))
+            
+            # Sum up one-hot vectors
+            # features_np[:, indices] is [B, n_cats]
+            batch_counts = features_np[:, indices].sum(axis=0)
+            if col in counts:
+                 counts[col] += batch_counts
+            
+            curr += n_cats
+            
+    # Normalize
+    for col in counts:
+        if total_samples > 0:
+            counts[col] /= total_samples
+        cat_frequencies[col] = counts[col].tolist()
+        
+    return cat_frequencies
 
 
 def load_config() -> tuple[dict, Path]:
@@ -49,12 +103,16 @@ def load_model(
     n_classes = meta.get("num_classes")
     if feat_dim is None or n_classes is None:
         raise ValueError("Checkpoint missing feature_dim/num_classes metadata")
-    model = TabularMLP(d_in=feat_dim, num_classes=n_classes)
+    
+    # Check for binary classification (output dim 1)
+    out_classes = 1 if n_classes == 2 else n_classes
+    
+    model = TabularMLP(d_in=feat_dim, num_classes=out_classes)
     model.load_state_dict(ckpt["model_state"])
     data_mean = ckpt.get("data_mean")
     data_std = ckpt.get("data_std")
     encoder_meta = ckpt.get("encoder_meta")
-    logger.info("Loaded global model from %s (feature_dim=%s num_classes=%s)", ckpt_path, feat_dim, n_classes)
+    logger.info("Loaded global model from %s (feature_dim=%s num_classes=%s out_dim=%s)", ckpt_path, feat_dim, n_classes, out_classes)
     return model, cfg, data_mean, data_std, encoder_meta
 
 
@@ -72,59 +130,90 @@ def get_set_dataloaders(cfg: dict, saved_encoder_meta: dict | None) -> tuple[dic
     return loaders, loaders["data_mean"], loaders["data_std"]
 
 
-def run_attack(model: TabularMLP, client_loader: DataLoader, data_mean: torch.Tensor, data_std: torch.Tensor) -> None:
-    attack_cfg = InvertingConfig(
-        data_extension=GiaTabularExtension(),
-        median_pooling=False,
-        tv_reg=0.0,
-        at_iterations=500,
-        attack_lr=0.1,
+def run_attack(model: TabularMLP, client_loader: DataLoader, data_mean: torch.Tensor, data_std: torch.Tensor, encoder_meta: dict, train_loader: DataLoader) -> None:
+    
+    # 1. Compute Public/Prior Stats
+    cat_freqs = compute_prior_stats(train_loader, encoder_meta)
+    encoder_meta['cat_frequencies'] = cat_freqs
+
+    # Configure TabularGIA
+    attack_config = {
+        "attack_lr": 0.01,
+        "iterations": 1000,
+        "reg_weight": 0.01,
+        "label_known": True,
+        "encoder_meta": encoder_meta 
+    }
+    
+    # Criterion 
+    criterion = torch.nn.BCEWithLogitsLoss()
+    
+    attacker = TabularGIA(
+        model=model,
+        client_loader=client_loader,
+        criterion=criterion,
+        config=attack_config,
+        data_extension=GiaTabularExtension()
     )
-    attack = InvertingGradients(model, client_loader, data_mean, data_std, configs=attack_cfg)
-    logger.info("Starting attack: steps=%d lr=%.4f", attack_cfg.at_iterations, attack_cfg.attack_lr)
-    attack.prepare_attack()
+    
+    logger.info("Starting TabularGIA attack: steps=%d lr=%.4f", attack_config["iterations"], attack_config["attack_lr"])
+    
+    attacker.prepare_attack()
+    
+    # 2. Prior Baseline Check (Before optimization)
+    gen = attacker.run_attack()
+    
+    last_score = 0
     last_result = None
-    for _, _, result in attack.run_attack():
-        if result is not None:
+    scores = []
+    
+    try:
+        iter_0, score_0, _ = next(gen)
+        logger.info(f"--- Prior Baseline Score: {score_0:.4f} ---")
+        scores.append(score_0)
+        last_score = score_0
+    except StopIteration:
+        pass
+
+    for i, score, result in gen:
+        last_score = score
+        scores.append(score)
+        if result:
             last_result = result
+            
     if last_result is None:
         logger.warning("No result produced.")
         return
 
-    logger.info("Attack complete: rmse=%.4f mae=%.4f", last_result.rmse_score, last_result.mae_score)
-    orig_tensor = torch.cat([batch[0] for batch in last_result.original_data], dim=0)
-    orig_labels = torch.cat([batch[1] for batch in last_result.original_data], dim=0).view(-1)
-    recon_tensor = torch.cat([batch[0] for batch in last_result.recreated_data], dim=0)
+    logger.info(f"Attack complete. Final Score: {last_score:.4f}")
+    
+    # Detailed logging
+    orig_tensor = attacker.original.cpu()
+    recon_tensor = attacker.best_reconstruction.detach().cpu()
+    
+    # De-standardize if mean/std available
+    if data_mean is not None and data_std is not None:
+        data_mean = data_mean.cpu()
+        data_std = data_std.cpu()
+        # Safe inverse transform
+        orig_raw = orig_tensor * data_std + data_mean
+        recon_raw = recon_tensor * data_std + data_mean
+    else:
+        orig_raw = orig_tensor
+        recon_raw = recon_tensor
 
-    per_feat_mse = torch.mean((orig_tensor - recon_tensor) ** 2, dim=0)
-    per_feat_rmse = torch.sqrt(per_feat_mse)
-    norm_rmse = (per_feat_rmse / data_std).detach().cpu().numpy()
-    logger.info("Per-feature RMSE: %s", per_feat_rmse.detach().cpu().numpy())
-    logger.info("Per-feature normalized RMSE (RMSE / std): %s", norm_rmse)
+    # Show metrics
+    if "reconstruction_metrics" in last_result:
+        metrics = last_result["reconstruction_metrics"]["aggregate"]
+        logger.info(f"Final Metrics: Numerical Score={metrics['numerical_score']:.4f}, Categorical Score={metrics['categorical_score']:.4f}")
+        print(f"FINAL_METRICS: Numerical={metrics['numerical_score']:.4f} Categorical={metrics['categorical_score']:.4f}")
 
+    # Show best row
     errors = torch.sum(torch.abs(orig_tensor - recon_tensor), dim=1)
     idx_best = int(errors.argmin().item())
-    if data_mean is not None and data_std is not None:
-        orig_row = (orig_tensor[idx_best] * data_std + data_mean).detach().cpu().numpy()
-        recon_row = (recon_tensor[idx_best] * data_std + data_mean).detach().cpu().numpy()
-    else:
-        orig_row = orig_tensor[idx_best].detach().cpu().numpy()
-        recon_row = recon_tensor[idx_best].detach().cpu().numpy()
-    logger.info("Best row (idx=%d) original: %s", idx_best, orig_row)
-    logger.info("Best row (idx=%d) reconstructed: %s", idx_best, recon_row)
+    logger.info("Best row (idx=%d) original: %s", idx_best, orig_raw[idx_best].numpy())
+    logger.info("Best row (idx=%d) reconstructed: %s", idx_best, recon_raw[idx_best].numpy())
 
-    try:
-        model.eval()
-        with torch.no_grad():
-            logits = model(recon_tensor)
-            if logits.ndim > 1 and logits.shape[1] > 1:
-                preds = logits.argmax(dim=1)
-            else:
-                preds = (torch.sigmoid(logits).view(-1) > 0.5).long()
-            label_acc = (preds.view(-1).cpu() == orig_labels.cpu()).float().mean().item()
-        logger.info("Label accuracy on reconstructed features: %.4f", label_acc)
-    except Exception:
-        logger.warning("Could not compute label accuracy (model mismatch)")
 
 
 def main(protocol: str = "fedsgd") -> None:
@@ -152,7 +241,7 @@ def main(protocol: str = "fedsgd") -> None:
         "ckpt" if ckpt_std is not None else "loader",
     )
 
-    run_attack(model, client_loader, data_mean, data_std)
+    run_attack(model, client_loader, data_mean, data_std, saved_encoder_meta, loaders["train_loader"])
 
 
 if __name__ == "__main__":

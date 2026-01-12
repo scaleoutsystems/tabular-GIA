@@ -116,10 +116,13 @@ class GiaImageYoloExtension(GiaDataModalityExtension):
 class GiaTabularExtension(GiaDataModalityExtension):
     """Tabular extension for GIA (minimal, tensor-only)."""
 
-    def get_at_data(self: Self, client_loader: DataLoader) -> tuple[DataLoader, Tensor, Tensor, list, DataLoader]:
+    def get_at_data(self: Self, client_loader: DataLoader, feature_meta: dict = None) -> tuple[DataLoader, Tensor, Tensor, list, DataLoader]:
         """Create reconstruction tensors matching tabular samples and labels.
 
-        Assumes client_loader yields (features, labels) where features are numeric tensors.
+        Args:
+            client_loader: DataLoader providing original data shapes
+            feature_meta: Optional dictionary containing feature metadata (means, stds, categories)
+                          for smart initialization.
         """
         batch_size = client_loader.batch_size or 32
 
@@ -138,7 +141,94 @@ class GiaTabularExtension(GiaDataModalityExtension):
                 labels.extend(deepcopy(lbls))
 
         original = torch.cat(originals, dim=0)
-        reconstruction = torch.randn_like(original)
+        
+        # Smart initialization if metadata is provided
+        if feature_meta:
+            reconstruction_np = np.zeros_like(original.cpu().numpy())
+            n_samples = reconstruction_np.shape[0]
+            
+            # 1. Numerical Initialization (Gaussian around mean/std)
+            if 'num_mean' in feature_meta and 'num_std' in feature_meta:
+                means = feature_meta['num_mean']
+                stds = feature_meta['num_std']
+                
+                # Convert to numpy if tensor
+                if isinstance(means, torch.Tensor):
+                    means = means.cpu().numpy()
+                elif hasattr(means, 'values'): # Pandas
+                    means = means.values
+                elif isinstance(means, list):
+                    means = np.array(means)
+                    
+                if isinstance(stds, torch.Tensor):
+                    stds = stds.cpu().numpy()
+                elif hasattr(stds, 'values'):
+                    stds = stds.values
+                elif isinstance(stds, list):
+                    stds = np.array(stds)
+                
+                num_cols = len(means) # Now safe
+                # Assuming numerical columns are first in the concatenation (standard in tabular.py)
+                for i in range(num_cols):
+                    reconstruction_np[:, i] = np.random.normal(means[i], stds[i], size=n_samples)
+            
+            # 2. Categorical Initialization (Frequency based)
+            # We expect feature_meta to potentially contain 'cat_frequencies': { 'col_name': [prob_cat1, prob_cat2, ...] }
+            cat_cols = feature_meta.get('cat_cols', [])
+            cat_frequencies = feature_meta.get('cat_frequencies', {})
+            cat_categories = feature_meta.get('cat_categories', {})
+            
+            # Current index tracks where we are in the flattened feature vector
+            # Assuming numerical columns are first (handled above)
+            current_idx = len(feature_meta.get('num_cols', []))
+            
+            for col in cat_cols:
+                # Get categories for this column
+                cats = cat_categories.get(col, [])
+                if isinstance(cats, dict): cats = cats.get('categories', []) # Handle old format if any
+                n_cats = len(cats)
+                
+                # Indices in the one-hot vector
+                indices = list(range(current_idx, current_idx + n_cats))
+                
+                if current_idx + n_cats > reconstruction_np.shape[1]:
+                    break
+                
+                # Check for frequencies
+                probs = cat_frequencies.get(col, None)
+                
+                # If we have valid probabilities, use them
+                if probs is not None and len(probs) == n_cats:
+                    # Normalize if needed
+                    probs = np.array(probs)
+                    msg_sum = probs.sum()
+                    if msg_sum > 0:
+                        probs = probs / msg_sum
+                    else:
+                        probs = None
+                
+                # Sample
+                if probs is not None:
+                    # Sample generic indices [0, ..., n_cats-1] based on probs
+                    choices = np.random.choice(n_cats, size=n_samples, p=probs)
+                else:
+                    # Uniform random fallback
+                    choices = np.random.randint(0, n_cats, size=n_samples)
+                
+                # Set one-hot
+                reconstruction_np[:, indices] = 0
+                for i, choice in enumerate(choices):
+                    reconstruction_np[i, indices[choice]] = 1.0
+                    
+                current_idx += n_cats
+                
+            # Fill any remaining with random noise (safety)
+            if current_idx < reconstruction_np.shape[1]:
+                 reconstruction_np[:, current_idx:] = np.random.randn(n_samples, reconstruction_np.shape[1] - current_idx)
+
+            reconstruction = torch.tensor(reconstruction_np, dtype=torch.float32)
+        else:
+            reconstruction = torch.randn_like(original)
 
         org_dataset = CustomTensorDataset(original, labels)
         org_loader = DataLoader(org_dataset, batch_size=batch_size, shuffle=True)
