@@ -11,18 +11,17 @@ from torch.utils.data import DataLoader, TensorDataset
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 
+from leakpro.attacks.gia_attacks.invertinggradients import InvertingGradients, InvertingConfig
 from leakpro.fl_utils.data_utils import GiaTabularExtension
 from leakpro.utils.seed import seed_everything
 
-# Local imports
-# Local imports
-from tabular_metrics import evaluate_reconstruction, count_constraint_violations
+from tabular_metrics import evaluate_reconstruction
 
 from train import train_global_model
 from model import TabularMLP
 from tabular import get_tabular_loaders, load_tabular_config
 
-from leakpro.attacks.gia_attacks.invertinggradients import InvertingGradients, InvertingConfig
+
 
 
 logger = logging.getLogger(__name__)
@@ -51,7 +50,7 @@ def compute_prior_stats(loader: DataLoader, encoder_meta: dict) -> dict:
     
     for batch in loader:
         features = batch[0] # [B, D]
-        features_np = features.numpy()
+        features_np = features.cpu().numpy()
         total_samples += features.shape[0]
         
         curr = start_idx
@@ -93,6 +92,14 @@ def load_config() -> tuple[dict, Path]:
     return cfg, ckpt_path
 
 
+def _move_loader_to_device(loader: DataLoader, device: torch.device) -> DataLoader:
+    """In-place move of TensorDataset tensors to match model device."""
+    ds = loader.dataset
+    if hasattr(ds, "tensors"):
+        ds.tensors = tuple(t.to(device) for t in ds.tensors)
+    return loader
+
+
 def load_model(
     ckpt_path: Path,
     default_cfg: dict,
@@ -103,20 +110,28 @@ def load_model(
     meta = ckpt.get("meta", {})
     feat_dim = meta.get("feature_dim")
     n_classes = meta.get("num_classes")
+    task = meta.get("task")
+    head_out = meta.get("head_out")
     if feat_dim is None or n_classes is None:
         raise ValueError("Checkpoint missing feature_dim/num_classes metadata")
-    
-    # Check for binary classification (output dim 1)
-    out_classes = 1 if n_classes == 2 else n_classes
-    
-    model = TabularMLP(d_in=feat_dim, num_classes=out_classes)
+
+    # For binary tasks we train a single-logit BCE head; honor stored head_out to reload correctly.
+    out_dim = head_out if head_out is not None else (1 if task == "binary" else n_classes)
+    model = TabularMLP(d_in=feat_dim, num_classes=out_dim)
     model.load_state_dict(ckpt["model_state"])
     data_mean = ckpt.get("data_mean")
     data_std = ckpt.get("data_std")
     encoder_meta = ckpt.get("encoder_meta")
+    logger.info(
+        "Loaded global model from %s (feature_dim=%s targets=%s head_out=%s task=%s)",
+        ckpt_path,
+        feat_dim,
+        n_classes,
+        out_dim,
+        task,
+    )
     if encoder_meta is not None:
         encoder_meta["num_classes"] = n_classes
-    logger.info("Loaded global model from %s (feature_dim=%s num_classes=%s out_dim=%s)", ckpt_path, feat_dim, n_classes, out_classes)
     return model, cfg, data_mean, data_std, encoder_meta
 
 
@@ -140,8 +155,20 @@ def run_attack(model: TabularMLP, client_loader: DataLoader, data_mean: torch.Te
     cat_freqs = compute_prior_stats(train_loader, encoder_meta)
     encoder_meta['cat_frequencies'] = cat_freqs
 
-    # Criterion 
-    criterion = torch.nn.BCEWithLogitsLoss()
+    # Choose task-aware criterion
+    num_classes = encoder_meta.get("num_classes")
+    target_mode = encoder_meta.get("target_mode")
+    if target_mode == "classification":
+        task = "binary" if num_classes == 2 else "multiclass"
+    else:
+        task = target_mode or ("binary" if num_classes == 2 else "multiclass" if num_classes and num_classes > 2 else "regression")
+
+    if task == "binary":
+        criterion = torch.nn.BCEWithLogitsLoss()
+    elif task == "multiclass":
+        criterion = torch.nn.CrossEntropyLoss()
+    else:
+        criterion = torch.nn.MSELoss()
     
     data_extension = GiaTabularExtension()
     data_extension.feature_meta = encoder_meta # Inject meta for constraints initialization
@@ -192,7 +219,7 @@ def run_attack(model: TabularMLP, client_loader: DataLoader, data_mean: torch.Te
         logger.warning("No result produced.")
         return
 
-    logger.info(f"Attack complete. Final Score: {last_score.item():.4f}")
+    logger.info(f"Attack complete. Final Score: {float(last_score):.4f}")
     
     # Detailed logging
     # InvertingGradients stores best_reconstruction as DataLoader (copied from reconstruction_loader)
@@ -242,24 +269,30 @@ def run_attack(model: TabularMLP, client_loader: DataLoader, data_mean: torch.Te
 
 def main(protocol: str = "fedsgd") -> None:
     seed_everything(42)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     base_cfg, ckpt_path = load_config()
     if not ckpt_path.exists():
         ckpt_path, _ = train_global_model(base_cfg)
 
     model, _, ckpt_mean, ckpt_std, saved_encoder_meta = load_model(ckpt_path, default_cfg=base_cfg)
+    model = model.to(device)
     loaders, data_mean_loader, data_std_loader = get_set_dataloaders(base_cfg, saved_encoder_meta)
 
-    client_loader = loaders["client_loader"]
+    client_loader = _move_loader_to_device(loaders["client_loader"], device)
     if protocol == "fedsgd":
         xb, yb = next(iter(client_loader))
         fedsgd_ds = TensorDataset(xb, yb)
-        client_loader = DataLoader(fedsgd_ds, batch_size=len(xb), shuffle=False)
+        client_loader = _move_loader_to_device(DataLoader(fedsgd_ds, batch_size=len(xb), shuffle=False), device)
         logger.info("Protocol=fedsgd: using single batch of size %d from client split (orig size=%d)", len(xb), len(loaders["client_loader"].dataset))
     else:
         logger.info("Protocol=fedavg: using full client split (size=%d)", len(client_loader.dataset))
 
     data_mean = ckpt_mean if ckpt_mean is not None else data_mean_loader
     data_std = ckpt_std if ckpt_std is not None else data_std_loader
+    if data_mean is not None:
+        data_mean = data_mean.to(device)
+    if data_std is not None:
+        data_std = data_std.to(device)
     logger.info("Using data_mean=%s data_std=%s (checkpoint overrides loader if present)",
         "ckpt" if ckpt_mean is not None else "loader",
         "ckpt" if ckpt_std is not None else "loader",

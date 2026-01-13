@@ -49,6 +49,7 @@ def run_epoch(
 	is_multiclass: bool,
 	metric_classes: int,
 	optimizer: torch.optim.Optimizer | None = None,
+	device: torch.device | None = None,
 ) -> Dict[str, float | torch.Tensor | int]:
 	train_mode = optimizer is not None
 	model.train() if train_mode else model.eval()
@@ -59,6 +60,8 @@ def run_epoch(
 
 	with torch.enable_grad() if train_mode else torch.no_grad():
 		for xb, yb in loader:
+			xb = xb.to(device) if device is not None else xb
+			yb = yb.to(device) if device is not None else yb
 			logits = model(xb)
 			if is_binary:
 				yb_t = yb.float().view(-1, 1)
@@ -109,20 +112,32 @@ def _macro_f1(cm: torch.Tensor) -> float:
 
 
 def log_classification(epoch: int, epochs: int, lr: float, train_stats: Dict, val_stats: Dict, is_multiclass: bool) -> None:
-	train_f1 = _macro_f1(train_stats["cm"].to(torch.float32)) if is_multiclass else None
-	val_f1 = _macro_f1(val_stats["cm"].to(torch.float32)) if is_multiclass else None
-	logger.info(
-		"Epoch %d/%d - lr=%.5f train_acc=%.4f val_acc=%.4f train_f1=%.4f val_f1=%.4f train_loss=%.4f val_loss=%.4f",
-		epoch + 1,
-		epochs,
-		lr,
-		train_stats["acc"],
-		val_stats["acc"],
-		train_f1 or 0.0,
-		val_f1 or 0.0,
-		train_stats["loss"],
-		val_stats["loss"],
-	)
+	if is_multiclass:
+		train_f1 = _macro_f1(train_stats["cm"].to(torch.float32))
+		val_f1 = _macro_f1(val_stats["cm"].to(torch.float32))
+		logger.info(
+			"Epoch %d/%d - lr=%.5f train_acc=%.4f val_acc=%.4f train_f1=%.4f val_f1=%.4f train_loss=%.4f val_loss=%.4f",
+			epoch + 1,
+			epochs,
+			lr,
+			train_stats["acc"],
+			val_stats["acc"],
+			train_f1,
+			val_f1,
+			train_stats["loss"],
+			val_stats["loss"],
+		)
+	else:
+		logger.info(
+			"Epoch %d/%d - lr=%.5f train_acc=%.4f val_acc=%.4f train_loss=%.4f val_loss=%.4f",
+			epoch + 1,
+			epochs,
+			lr,
+			train_stats["acc"],
+			val_stats["acc"],
+			train_stats["loss"],
+			val_stats["loss"],
+		)
 
 
 def log_regression(epoch: int, epochs: int, lr: float, train_stats: Dict, val_stats: Dict) -> None:
@@ -143,7 +158,8 @@ def log_regression(epoch: int, epochs: int, lr: float, train_stats: Dict, val_st
 
 
 def test(model: nn.Module, loader: DataLoader, criterion: nn.Module, is_binary: bool, is_multiclass: bool, metric_classes: int) -> None:
-	stats = run_epoch(loader, model, criterion, is_binary, is_multiclass, metric_classes)
+	device = next(model.parameters()).device
+	stats = run_epoch(loader, model, criterion, is_binary, is_multiclass, metric_classes, device=device)
 	if is_binary or is_multiclass:
 		acc = stats["acc"]
 		f1 = _macro_f1(stats["cm"].to(torch.float32)) if is_multiclass else None
@@ -166,11 +182,13 @@ def train(
 	is_binary: bool,
 	is_multiclass: bool,
 	metric_classes: int,
+	head_out: int,
 	data_mean: torch.Tensor,
 	data_std: torch.Tensor,
 	encoder_meta: dict,
 	checkpoint_path: Path,
 ) -> float:
+	device = next(model.parameters()).device
 	trainer_cfg = cfg.get("trainer", {}) or {}
 	epochs = trainer_cfg.get("epochs", 20)
 	lr = trainer_cfg.get("lr", 1e-3)
@@ -183,8 +201,8 @@ def train(
 		for pg in optimizer.param_groups:
 			pg["lr"] = current_lr
 
-		train_stats = run_epoch(loaders["train_loader"], model, criterion, is_binary, is_multiclass, metric_classes, optimizer)
-		val_stats = run_epoch(loaders["val_loader"], model, criterion, is_binary, is_multiclass, metric_classes)
+		train_stats = run_epoch(loaders["train_loader"], model, criterion, is_binary, is_multiclass, metric_classes, optimizer, device)
+		val_stats = run_epoch(loaders["val_loader"], model, criterion, is_binary, is_multiclass, metric_classes, device=device)
 		val_metric = val_stats["acc"] if (is_binary or is_multiclass) else -val_stats["loss"]
 
 		if is_binary or is_multiclass:
@@ -202,16 +220,17 @@ def train(
 					"data_std": data_std,
 					"config": cfg,
 					"encoder_meta": encoder_meta,
-					"meta": {
-						"epochs": epoch + 1,
-						"train_acc": train_stats.get("acc"),
-						"train_loss": train_stats["loss"],
-						"val_metric": val_metric if (is_binary or is_multiclass) else None,
-						"val_loss": val_stats["loss"] if not (is_binary or is_multiclass) else None,
-						"feature_dim": loaders["n_features"],
-						"num_classes": loaders["num_classes"],
-						"task": "binary" if is_binary else ("multiclass" if is_multiclass else "regression"),
-					},
+						"meta": {
+							"epochs": epoch + 1,
+							"train_acc": train_stats.get("acc"),
+							"train_loss": train_stats["loss"],
+							"val_metric": val_metric if (is_binary or is_multiclass) else None,
+							"val_loss": val_stats["loss"] if not (is_binary or is_multiclass) else None,
+							"feature_dim": loaders["n_features"],
+							"num_classes": loaders["num_classes"],  # number of target classes
+							"head_out": head_out,  # model output dim; 1 for binary BCE head
+							"task": "binary" if is_binary else ("multiclass" if is_multiclass else "regression"),
+						},
 				},
 				checkpoint_path,
 			)
@@ -222,6 +241,7 @@ def train(
 
 def train_global_model(cfg: dict) -> Tuple[Path, float]:
 	seed_everything(cfg["seed"])
+	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 	trainer_cfg = cfg.get("trainer", {}) or {}
 
 	data_path = Path(cfg["data_path"])
@@ -254,8 +274,8 @@ def train_global_model(cfg: dict) -> Tuple[Path, float]:
 	metric_classes = 2 if is_binary else num_classes
 
 	logger.info("Detected task=%s, num_classes=%s", "binary" if is_binary else ("multiclass" if is_multiclass else "regression"), num_classes)
-	model = TabularMLP(d_in=n_features, num_classes=out_classes)
-	criterion = nn.BCEWithLogitsLoss() if is_binary else nn.CrossEntropyLoss() if is_multiclass else nn.MSELoss()
+	model = TabularMLP(d_in=n_features, num_classes=out_classes).to(device)
+	criterion = (nn.BCEWithLogitsLoss() if is_binary else nn.CrossEntropyLoss() if is_multiclass else nn.MSELoss()).to(device)
 
 	optimizer = make_optimizer(
 		model,
@@ -273,6 +293,7 @@ def train_global_model(cfg: dict) -> Tuple[Path, float]:
 		is_binary,
 		is_multiclass,
 		metric_classes,
+		out_classes,
 		loaders["data_mean"],
 		loaders["data_std"],
 		encoder_meta,
@@ -282,7 +303,7 @@ def train_global_model(cfg: dict) -> Tuple[Path, float]:
 	if loaders.get("test_loader") is not None:
 		state = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
 		model.load_state_dict(state["model_state"])
-		model.eval()
+		model = model.to(device).eval()
 		test(model, loaders["test_loader"], criterion, is_binary, is_multiclass, metric_classes)
 
 	return checkpoint_path, best_val

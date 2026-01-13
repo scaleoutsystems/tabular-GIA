@@ -142,12 +142,6 @@ class GiaTabularExtension(GiaDataModalityExtension):
 
             originals.append(feats.clone())
             if isinstance(lbls, Tensor):
-                # If binary classification, labels might need to be [B, 1] for BCE loss
-                if feature_meta and feature_meta.get('num_classes') == 2:
-                    if lbls.dim() == 1:
-                        lbls = lbls.unsqueeze(1)
-                    lbls = lbls.float() # BCE needs float targets
-                
                 labels.extend(deepcopy(lbls))
             else:
                 labels.extend(deepcopy(lbls))

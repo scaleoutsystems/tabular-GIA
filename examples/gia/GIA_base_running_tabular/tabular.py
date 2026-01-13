@@ -353,6 +353,13 @@ def load_tabular_dataset(
 	y_test_t = _encode_target_apply(y_test, target_classes, target_mode) if y_test is not None else torch.tensor([])
 	y_client_t = _encode_target_apply(y_client, target_classes, target_mode)
 
+	# For binary classification, use float column vectors so single-logit BCE heads match label shape
+	if target_mode == "classification" and num_classes == 2:
+		y_train_t = y_train_t.float().view(-1, 1)
+		y_val_t = y_val_t.float().view(-1, 1)
+		y_test_t = y_test_t.float().view(-1, 1) if y_test_t.numel() else y_test_t
+		y_client_t = y_client_t.float().view(-1, 1)
+
 	encoder_meta["target_classes"] = target_classes
 	encoder_meta["target_mode"] = target_mode
 

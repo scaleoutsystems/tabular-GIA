@@ -133,7 +133,7 @@ class AbstractGIA(AbstractAttack):
                     logger.info(f"New best loss: {loss} on round: {i}")
 
                 # Enforce constraints if data extension supports it (e.g., Tabular)
-                if i % 10 == 0 and hasattr(configs.data_extension, 'enforce_constraints'):
+                if i % 100 == 0 and hasattr(configs.data_extension, 'enforce_constraints'):
                     reconstruction.data = configs.data_extension.enforce_constraints(reconstruction.data)
 
                 if i % 250 == 0:
