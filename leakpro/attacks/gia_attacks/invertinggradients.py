@@ -12,7 +12,7 @@ from torch.nn import CrossEntropyLoss, Module
 from torch.utils.data import DataLoader
 
 from leakpro.attacks.gia_attacks.abstract_gia import AbstractGIA
-from leakpro.fl_utils.data_utils import GiaImageExtension
+from leakpro.fl_utils.data_utils import GiaImageExtension, GiaTabularExtension
 from leakpro.fl_utils.gia_optimizers import MetaSGD
 from leakpro.fl_utils.gia_train import train
 from leakpro.fl_utils.similarity_measurements import (
@@ -119,9 +119,10 @@ class InvertingGradients(AbstractGIA):
             GIAResults: Container for results on GIA attacks.
 
         """
+        self.is_tabular = isinstance(self.configs.data_extension, GiaTabularExtension)
         return self.generic_attack_loop(self.configs, self.gradient_closure, self.configs.at_iterations, self.reconstruction,
                                 self.data_mean, self.data_std, self.configs.attack_lr, self.configs.median_pooling,
-                                self.client_loader, self.reconstruction_loader)
+                                self.client_loader, self.reconstruction_loader, is_tabular=self.is_tabular)
 
 
     def gradient_closure(self: Self, optimizer: torch.optim.Optimizer) -> Callable:
@@ -149,9 +150,9 @@ class InvertingGradients(AbstractGIA):
             gradient = self.train_fn(self.model, self.reconstruction_loader, self.configs.optimizer,
                                      self.configs.criterion, self.configs.epochs)
             rec_loss = cosine_similarity_weights(gradient, self.client_gradient, self.configs.top10norms)
-            tv_reg = (self.configs.tv_reg * total_variation(self.reconstruction))
-            # Add the TV loss term to penalize large variations between pixels, encouraging smoother images.
-            rec_loss += tv_reg
+            if not getattr(self, "is_tabular", False):
+                tv_reg = (self.configs.tv_reg * total_variation(self.reconstruction))
+                rec_loss += tv_reg
             rec_loss.backward()
             return rec_loss
         return closure

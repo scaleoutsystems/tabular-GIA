@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sn
+import torch
 from pydantic import BaseModel
 from sklearn.metrics import (
     accuracy_score,
@@ -536,7 +537,10 @@ class GIAResults:
             data_mean: float = None,
             data_std: float = None,
             config: dict = None,
-            images: bool = True
+            images: bool = True,
+            rmse_score: float = None,
+            mae_score: float = None,
+            is_tabular: bool = False
         ) -> None:
 
         self.original_data = original_data
@@ -547,6 +551,9 @@ class GIAResults:
         self.data_std = data_std
         self.config = config
         self.images = images
+        self.rmse_score = rmse_score
+        self.mae_score = mae_score
+        self.is_tabular = is_tabular
 
     @staticmethod
     def load(
@@ -594,7 +601,15 @@ class GIAResults:
         self.id = f"{name}{config_name}"
         path = f"{path}/gradient_inversion/{self.id}"
 
-        if self.images:
+        if self.is_tabular:
+            os.makedirs(path, exist_ok=True)
+            original_tensor = torch.cat([batch[0] for batch in self.original_data], dim=0)
+            recreated_tensor = torch.cat([batch[0] for batch in self.recreated_data], dim=0)
+            np.save(os.path.join(path, "original.npy"), original_tensor.cpu().numpy())
+            np.save(os.path.join(path, "recreated.npy"), recreated_tensor.cpu().numpy())
+            with open(os.path.join(path, "metrics.json"), "w") as f:
+                json.dump({"rmse": self.rmse_score, "mae": self.mae_score}, f)
+        elif self.images:
              # Check if path exists, otherwise create it.
             img_save(path, self.recreated_data, self.original_data, self.data_std, self.data_mean)
         else:
