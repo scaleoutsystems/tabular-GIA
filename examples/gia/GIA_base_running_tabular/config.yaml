@@ -1,12 +1,12 @@
 dataset:
-  #data_path: data/binary/adult/adult.csv
-  #meta_path: data/binary/adult/adult.yaml
+  data_path: data/binary/adult/adult.csv
+  meta_path: data/binary/adult/adult.yaml
 
   #data_path: data/multiclass/statlog+shuttle/statlog+shuttle.train.csv
   #meta_path: data/multiclass/statlog+shuttle/statlog+shuttle.yaml
 
-  data_path: data/regression/california_housing/california_housing.csv
-  meta_path: data/regression/california_housing/california_housing.yaml
+  #data_path: data/regression/california_housing/california_housing.csv
+  #meta_path: data/regression/california_housing/california_housing.yaml
   
   batch_size: 128
   seed: 42
