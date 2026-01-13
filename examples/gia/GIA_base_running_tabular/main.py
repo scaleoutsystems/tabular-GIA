@@ -15,12 +15,14 @@ from leakpro.fl_utils.data_utils import GiaTabularExtension
 from leakpro.utils.seed import seed_everything
 
 # Local imports
-from tabular_gia_attack import TabularGIA
+# Local imports
 from tabular_metrics import evaluate_reconstruction, count_constraint_violations
 
 from train import train_global_model
 from model import TabularMLP
 from tabular import get_tabular_loaders, load_tabular_config
+
+from leakpro.attacks.gia_attacks.invertinggradients import InvertingGradients, InvertingConfig
 
 
 logger = logging.getLogger(__name__)
@@ -112,6 +114,8 @@ def load_model(
     data_mean = ckpt.get("data_mean")
     data_std = ckpt.get("data_std")
     encoder_meta = ckpt.get("encoder_meta")
+    if encoder_meta is not None:
+        encoder_meta["num_classes"] = n_classes
     logger.info("Loaded global model from %s (feature_dim=%s num_classes=%s out_dim=%s)", ckpt_path, feat_dim, n_classes, out_classes)
     return model, cfg, data_mean, data_std, encoder_meta
 
@@ -136,27 +140,30 @@ def run_attack(model: TabularMLP, client_loader: DataLoader, data_mean: torch.Te
     cat_freqs = compute_prior_stats(train_loader, encoder_meta)
     encoder_meta['cat_frequencies'] = cat_freqs
 
-    # Configure TabularGIA
-    attack_config = {
-        "attack_lr": 0.01,
-        "iterations": 1000,
-        "reg_weight": 0.01,
-        "label_known": True,
-        "encoder_meta": encoder_meta 
-    }
-    
     # Criterion 
     criterion = torch.nn.BCEWithLogitsLoss()
     
-    attacker = TabularGIA(
-        model=model,
-        client_loader=client_loader,
+    data_extension = GiaTabularExtension()
+    data_extension.feature_meta = encoder_meta # Inject meta for constraints initialization
+
+    # Configure InvertingGradients
+    attack_config = InvertingConfig(
+        attack_lr=0.01,
+        at_iterations=1000,
+        tv_reg=0.01, # This will be ignored by generic_attack_loop because is_tabular will be true
         criterion=criterion,
-        config=attack_config,
-        data_extension=GiaTabularExtension()
+        data_extension=data_extension
     )
     
-    logger.info("Starting TabularGIA attack: steps=%d lr=%.4f", attack_config["iterations"], attack_config["attack_lr"])
+    attacker = InvertingGradients(
+        model=model,
+        client_loader=client_loader,
+        data_mean=data_mean, 
+        data_std=data_std,
+        configs=attack_config
+    )
+    
+    logger.info("Starting Tabular GIA (using InvertingGradients): steps=%d lr=%.4f", attack_config.at_iterations, attack_config.attack_lr)
     
     attacker.prepare_attack()
     
@@ -185,11 +192,17 @@ def run_attack(model: TabularMLP, client_loader: DataLoader, data_mean: torch.Te
         logger.warning("No result produced.")
         return
 
-    logger.info(f"Attack complete. Final Score: {last_score:.4f}")
+    logger.info(f"Attack complete. Final Score: {last_score.item():.4f}")
     
     # Detailed logging
+    # InvertingGradients stores best_reconstruction as DataLoader (copied from reconstruction_loader)
+    # We need to extract the tensor
+    if attacker.best_reconstruction:
+        recon_tensor = torch.cat([batch[0] for batch in attacker.best_reconstruction], dim=0).detach().cpu()
+    else:
+        recon_tensor = torch.zeros_like(attacker.original.cpu())
+
     orig_tensor = attacker.original.cpu()
-    recon_tensor = attacker.best_reconstruction.detach().cpu()
     
     # De-standardize if mean/std available
     if data_mean is not None and data_std is not None:
@@ -203,10 +216,21 @@ def run_attack(model: TabularMLP, client_loader: DataLoader, data_mean: torch.Te
         recon_raw = recon_tensor
 
     # Show metrics
-    if "reconstruction_metrics" in last_result:
-        metrics = last_result["reconstruction_metrics"]["aggregate"]
-        logger.info(f"Final Metrics: Numerical Score={metrics['numerical_score']:.4f}, Categorical Score={metrics['categorical_score']:.4f}")
-        print(f"FINAL_METRICS: Numerical={metrics['numerical_score']:.4f} Categorical={metrics['categorical_score']:.4f}")
+    if last_result:
+        # last_result is GIAResults object
+        # It contains rmse_score, mae_score etc for tabular
+        logger.info(f"Final Metrics: RMSE={last_result.rmse_score:.4f}, MAE={last_result.mae_score:.4f}")
+        
+        # We can also re-calculate our custom detailed metrics if desired
+        full_metrics = evaluate_reconstruction(
+             attacker.original.to(attacker.original.device), 
+             recon_tensor.to(attacker.original.device), 
+             encoder_meta, 
+             return_per_feature=True
+        )
+        agg = full_metrics['aggregate']
+        logger.info(f"Detailed Metrics: Numerical Score={agg['numerical_score']:.4f}, Categorical Score={agg['categorical_score']:.4f}")
+        print(f"FINAL_METRICS: Numerical={agg['numerical_score']:.4f} Categorical={agg['categorical_score']:.4f}")
 
     # Show best row
     errors = torch.sum(torch.abs(orig_tensor - recon_tensor), dim=1)

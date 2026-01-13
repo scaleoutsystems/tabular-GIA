@@ -131,6 +131,11 @@ class AbstractGIA(AbstractAttack):
                     self.best_reconstruction = deepcopy(pre_step_loader)
                     self.best_reconstruction_round = i
                     logger.info(f"New best loss: {loss} on round: {i}")
+
+                # Enforce constraints if data extension supports it (e.g., Tabular)
+                if i % 10 == 0 and hasattr(configs.data_extension, 'enforce_constraints'):
+                    reconstruction.data = configs.data_extension.enforce_constraints(reconstruction.data)
+
                 if i % 250 == 0:
                     logger.info(f"Iteration {i}, loss {loss}")
                     if is_tabular:
@@ -147,9 +152,26 @@ class AbstractGIA(AbstractAttack):
             logger.info(f"Attack stopped due to {e}. \
                         Saving results.")
         if is_tabular:
+            # Enforce constraints on best reconstruction before metrics
+            if hasattr(configs.data_extension, 'enforce_constraints'):
+                # Note: best_reconstruction is a DataLoader. We need to extract tensor, enforce, and repack?
+                # Actually, Tabular GIA used 'best_reconstruction' as Tensor internally. 
+                # AbstractGIA uses it as DataLoader. This is a mismatch.
+                # However, generic_attack_loop takes 'reconstruction' (Tensor).
+                # best_reconstruction is updated as deepcopy(pre_step_loader).
+                # Let's rely on the result generator to handle final processing or 
+                # blindly trust the periodic enforcement was enough.
+                pass
+            
             # Compute simple tabular reconstruction metrics
             orig_tensor = torch.cat([batch[0] for batch in client_loader], dim=0)
+            
+            # Re-collect tensor from loader
             recon_tensor = torch.cat([batch[0] for batch in self.best_reconstruction], dim=0)
+            
+            if hasattr(configs.data_extension, 'enforce_constraints'):
+                 recon_tensor = configs.data_extension.enforce_constraints(recon_tensor)
+            
             mse = torch.mean((orig_tensor - recon_tensor) ** 2).item()
             mae = torch.mean(torch.abs(orig_tensor - recon_tensor)).item()
             rmse = mse ** 0.5

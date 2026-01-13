@@ -126,6 +126,12 @@ class GiaTabularExtension(GiaDataModalityExtension):
         """
         batch_size = client_loader.batch_size or 32
 
+        # Use injected metadata if not provided as argument
+        if feature_meta is not None:
+            self.feature_meta = feature_meta
+        else:
+            feature_meta = getattr(self, 'feature_meta', None)
+
         originals = []
         labels: list = []
         for batch in client_loader:
@@ -136,6 +142,12 @@ class GiaTabularExtension(GiaDataModalityExtension):
 
             originals.append(feats.clone())
             if isinstance(lbls, Tensor):
+                # If binary classification, labels might need to be [B, 1] for BCE loss
+                if feature_meta and feature_meta.get('num_classes') == 2:
+                    if lbls.dim() == 1:
+                        lbls = lbls.unsqueeze(1)
+                    lbls = lbls.float() # BCE needs float targets
+                
                 labels.extend(deepcopy(lbls))
             else:
                 labels.extend(deepcopy(lbls))
@@ -237,6 +249,52 @@ class GiaTabularExtension(GiaDataModalityExtension):
         reconstruction_loader = DataLoader(reconstruction_dataset, batch_size=batch_size, shuffle=True)
 
         return org_loader, original, reconstruction, labels, reconstruction_loader
+
+    def enforce_constraints(self: Self, data: Tensor) -> Tensor:
+        """Project data to valid space (one-hot for categorical, clipped for numerical)."""
+        feature_meta = getattr(self, 'feature_meta', None)
+        if feature_meta is None:
+            return data
+            
+        # Using tabular.py metadata structure
+        if 'cat_dummy_cols' not in feature_meta:
+            return data
+
+        with torch.no_grad():
+            data_np = data.detach().cpu().numpy()
+            
+            num_cols = len(feature_meta.get('num_cols', []))
+            
+            # Constraint 1: Clip numerical features to reasonable range (normalized)
+            if num_cols > 0:
+                data_np[:, :num_cols] = np.clip(data_np[:, :num_cols], -5.0, 5.0)
+
+            # Constraint 2: One-hot projection for categoricals
+            current_idx = num_cols
+            cat_categories = feature_meta.get('cat_categories', {})
+            
+            # Iterate through keys in cat_categories
+            for cat_feat, cats in cat_categories.items():
+                if isinstance(cats, dict): cats = cats.get('categories', []) # Handle old format
+                num_cats = len(cats)
+                indices = list(range(current_idx, current_idx + num_cats))
+                
+                if current_idx + num_cats > data_np.shape[1]:
+                    break # Safety check
+                
+                # Extract and project
+                onehot_vectors = data_np[:, indices]
+                max_indices = onehot_vectors.argmax(axis=1)
+                
+                data_np[:, indices] = 0.0
+                for sample_idx, max_idx in enumerate(max_indices):
+                    data_np[sample_idx, indices[max_idx]] = 1.0
+                    
+                current_idx += num_cats
+            
+            data.copy_(torch.tensor(data_np, dtype=torch.float32, device=data.device))
+        
+        return data
 
 
 def get_meanstd(trainset: Dataset, axis_to_reduce: tuple=(-2,-1)) -> tuple[Tensor, Tensor]:

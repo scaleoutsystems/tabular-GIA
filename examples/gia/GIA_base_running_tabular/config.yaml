@@ -1,6 +1,6 @@
 dataset:
-  data_path: C:\Users\maxim\Documents\GitHub\LeakPro\examples\gia\GIA_base_running_tabular\data\binary\adult\adult.csv
-  meta_path: C:\Users\maxim\Documents\GitHub\LeakPro\examples\gia\GIA_base_running_tabular\data\binary\adult\adult.yaml
+  data_path: data/binary/adult/adult.csv
+  meta_path: data/binary/adult/adult.yaml
   batch_size: 128
   seed: 42
   normalize_numeric: true
