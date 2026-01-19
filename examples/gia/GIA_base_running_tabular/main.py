@@ -15,7 +15,7 @@ from leakpro.attacks.gia_attacks.invertinggradients import InvertingGradients, I
 from leakpro.fl_utils.data_utils import GiaTabularExtension
 from leakpro.utils.seed import seed_everything
 
-from tabular_metrics import evaluate_reconstruction
+from tabular_metrics import evaluate_reconstruction, nearest_neighbor_distance
 
 from train import train_global_model
 from model import TabularMLP
@@ -258,6 +258,33 @@ def run_attack(model: TabularMLP, client_loader: DataLoader, data_mean: torch.Te
         agg = full_metrics['aggregate']
         logger.info(f"Detailed Metrics: Numerical Score={agg['numerical_score']:.4f}, Categorical Score={agg['categorical_score']:.4f}")
         print(f"FINAL_METRICS: Numerical={agg['numerical_score']:.4f} Categorical={agg['categorical_score']:.4f}")
+
+        nn_batch = nearest_neighbor_distance(recon_tensor, orig_tensor, encoder_meta)
+        logger.info(
+            "NN distance (target batch): min=%.4f mean=%.4f median=%.4f",
+            nn_batch["min"],
+            nn_batch["mean"],
+            nn_batch["median"],
+        )
+
+        train_count = len(train_loader.dataset) if hasattr(train_loader, "dataset") else None
+        if train_count is not None:
+            est_values = train_count * recon_tensor.shape[1]
+            if est_values <= 2.0e7:
+                train_tensor = torch.cat([batch[0] for batch in train_loader], dim=0).detach().cpu()
+                nn_train = nearest_neighbor_distance(recon_tensor, train_tensor, encoder_meta)
+                logger.info(
+                    "NN distance (train set): min=%.4f mean=%.4f median=%.4f",
+                    nn_train["min"],
+                    nn_train["mean"],
+                    nn_train["median"],
+                )
+            else:
+                logger.info(
+                    "Skipped NN distance over train set (rows=%d features=%d).",
+                    train_count,
+                    recon_tensor.shape[1],
+                )
 
     # Show best row
     errors = torch.sum(torch.abs(orig_tensor - recon_tensor), dim=1)

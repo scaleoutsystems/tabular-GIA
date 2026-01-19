@@ -1,2 +1,18 @@
 target: income
 missing_values: "?"
+numerical_columns:
+  - age
+  - fnlwgt
+  - education-num
+  - capital-gain
+  - capital-loss
+  - hours-per-week
+categorical_columns:
+  - workclass
+  - education
+  - marital-status
+  - occupation
+  - relationship
+  - race
+  - sex
+  - native-country

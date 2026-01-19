@@ -78,10 +78,72 @@ def _load_dataset_meta(data_path: Path, meta_path: Optional[Path]) -> dict[str, 
 
 
 def _infer_column_types(X: pd.DataFrame) -> tuple[list[str], list[str]]:
-	"""Find which feature columns are categorical vs numeric."""
+	"""Find which feature columns are categorical vs numeric based on dtypes."""
 	cat_cols = [c for c in X.columns if str(X[c].dtype) == "object" or str(X[c].dtype).startswith("category")]
 	num_cols = [c for c in X.columns if c not in cat_cols]
 	return num_cols, cat_cols
+
+
+def _resolve_column_types(X: pd.DataFrame, meta: dict[str, Any]) -> tuple[list[str], list[str]]:
+	"""Resolve numeric/categorical columns from meta overrides when provided."""
+	explicit_num = meta.get("numerical_columns") or meta.get("numeric_columns")
+	explicit_cat = meta.get("categorical_columns")
+	if explicit_num is None and explicit_cat is None:
+		return _infer_column_types(X)
+
+	cols = list(X.columns)
+	explicit_num = list(explicit_num) if explicit_num is not None else None
+	explicit_cat = list(explicit_cat) if explicit_cat is not None else None
+
+	if explicit_num is None:
+		explicit_cat_set = set(explicit_cat)
+		unknown = explicit_cat_set - set(cols)
+		if unknown:
+			raise ValueError(f"categorical_columns contains unknown columns: {sorted(unknown)}")
+		explicit_num = [c for c in cols if c not in explicit_cat_set]
+	elif explicit_cat is None:
+		explicit_num_set = set(explicit_num)
+		unknown = explicit_num_set - set(cols)
+		if unknown:
+			raise ValueError(f"numerical_columns contains unknown columns: {sorted(unknown)}")
+		explicit_cat = [c for c in cols if c not in explicit_num_set]
+	else:
+		num_set = set(explicit_num)
+		cat_set = set(explicit_cat)
+		unknown = (num_set | cat_set) - set(cols)
+		if unknown:
+			raise ValueError(f"Column type lists contain unknown columns: {sorted(unknown)}")
+		overlap = num_set & cat_set
+		if overlap:
+			raise ValueError(f"Columns listed as both numeric and categorical: {sorted(overlap)}")
+		missing = set(cols) - (num_set | cat_set)
+		if missing:
+			raise ValueError(f"Columns missing from type lists: {sorted(missing)}")
+
+	logger.info(
+		"Using explicit column types from meta: num_cols=%d cat_cols=%d",
+		len(explicit_num),
+		len(explicit_cat),
+	)
+
+	# Warn when provided types disagree with pandas dtypes (helps catch mis-specified schemas).
+	for col in explicit_cat:
+		dtype_str = str(X[col].dtype)
+		if dtype_str not in ("object",) and not dtype_str.startswith("category"):
+			logger.warning(
+				"Column '%s' listed as categorical but dtype is %s; ensure this is intended.",
+				col,
+				dtype_str,
+			)
+	for col in explicit_num:
+		dtype_str = str(X[col].dtype)
+		if dtype_str == "object" or dtype_str.startswith("category"):
+			logger.warning(
+				"Column '%s' listed as numeric but dtype is %s; ensure this is intended.",
+				col,
+				dtype_str,
+			)
+	return explicit_num, explicit_cat
 
 
 def _fit_encoders(X_train: pd.DataFrame, num_cols: list[str], cat_cols: list[str], cfg: dict[str, Any]) -> dict[str, Any]:
@@ -265,8 +327,8 @@ def load_tabular_dataset(
 	y_test = test_df[target_col] if test_df is not None else None
 	X_test = test_df.drop(columns=[target_col]) if test_df is not None else None
 
-	# infer dtypes and impute features
-	num_cols, cat_cols = _infer_column_types(X)
+	# infer dtypes (or use explicit types) and impute features
+	num_cols, cat_cols = _resolve_column_types(X, meta)
 	X = _impute_features(X, num_cols, cat_cols, missing_values)
 	X_test = _impute_features(X_test, num_cols, cat_cols, missing_values) if X_test is not None else None
 

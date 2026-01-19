@@ -114,6 +114,108 @@ def evaluate_reconstruction(
     return results
 
 
+def _get_feature_groups(feature_info: Dict, total_dim: int) -> tuple[list[int], list[list[int]]]:
+    """Build numeric indices and categorical one-hot groups from encoder metadata."""
+    num_feats = feature_info.get('numerical_features') or feature_info.get('num_cols', [])
+    cat_feats = feature_info.get('categorical_features') or feature_info.get('cat_cols', [])
+    cat_categories = feature_info.get('category_mappings') or feature_info.get('cat_categories', {})
+
+    num_count = len(num_feats)
+    num_indices = list(range(min(num_count, total_dim)))
+    current_idx = num_count
+    cat_groups: list[list[int]] = []
+
+    for feature in cat_feats:
+        cats = cat_categories.get(feature)
+        if cats is None:
+            continue
+        if isinstance(cats, dict):
+            cats = cats.get('categories', [])
+        num_cats = len(cats)
+        if num_cats <= 0:
+            continue
+        if current_idx + num_cats > total_dim:
+            break
+        cat_groups.append(list(range(current_idx, current_idx + num_cats)))
+        current_idx += num_cats
+
+    return num_indices, cat_groups
+
+
+def nearest_neighbor_distance(
+    reconstructed: Tensor,
+    reference: Tensor | DataLoader,
+    feature_info: Dict,
+    num_weight: float = 0.5,
+    cat_weight: float = 0.5,
+    chunk_size: int = 2048,
+) -> Dict:
+    """Compute nearest-neighbor distance for each reconstructed row to a reference set."""
+    recon_np = reconstructed.detach().cpu().numpy()
+    num_idx, cat_groups = _get_feature_groups(feature_info, recon_np.shape[1])
+    n_num = len(num_idx)
+    n_cat = len(cat_groups)
+
+    if n_num == 0 and n_cat == 0:
+        return {"min": float("nan"), "mean": float("nan"), "median": float("nan"), "per_record": []}
+
+    if n_num > 0 and n_cat > 0:
+        weight_sum = num_weight + cat_weight
+        if weight_sum <= 0:
+            num_weight, cat_weight = 0.5, 0.5
+        else:
+            num_weight /= weight_sum
+            cat_weight /= weight_sum
+
+    rec_num = recon_np[:, num_idx] if n_num > 0 else None
+    rec_cat_labels = [np.argmax(recon_np[:, idxs], axis=1) for idxs in cat_groups] if n_cat > 0 else []
+    min_dist = np.full((recon_np.shape[0],), np.inf, dtype=np.float32)
+
+    if isinstance(reference, DataLoader):
+        ref_iter = (batch[0].detach().cpu().numpy() for batch in reference)
+    else:
+        ref_np = reference.detach().cpu().numpy()
+        ref_iter = (ref_np[i:i + chunk_size] for i in range(0, ref_np.shape[0], chunk_size))
+
+    for ref_chunk in ref_iter:
+        if ref_chunk.size == 0:
+            continue
+        if n_num > 0:
+            ref_num = ref_chunk[:, num_idx]
+            num_dist = np.zeros((recon_np.shape[0], ref_chunk.shape[0]), dtype=np.float32)
+            for col_idx in range(n_num):
+                num_dist += np.abs(rec_num[:, None, col_idx] - ref_num[None, :, col_idx])
+            num_dist /= n_num
+        else:
+            num_dist = None
+
+        if n_cat > 0:
+            cat_dist = np.zeros((recon_np.shape[0], ref_chunk.shape[0]), dtype=np.float32)
+            for group_idx, idxs in enumerate(cat_groups):
+                rec_labels = rec_cat_labels[group_idx]
+                ref_labels = np.argmax(ref_chunk[:, idxs], axis=1)
+                cat_dist += (rec_labels[:, None] != ref_labels[None, :]).astype(np.float32)
+            cat_dist /= n_cat
+        else:
+            cat_dist = None
+
+        if num_dist is not None and cat_dist is not None:
+            dist = num_weight * num_dist + cat_weight * cat_dist
+        elif num_dist is not None:
+            dist = num_dist
+        else:
+            dist = cat_dist
+
+        min_dist = np.minimum(min_dist, dist.min(axis=1))
+
+    return {
+        "min": float(np.min(min_dist)),
+        "mean": float(np.mean(min_dist)),
+        "median": float(np.median(min_dist)),
+        "per_record": min_dist.tolist(),
+    }
+
+
 def count_constraint_violations(reconstructed: Tensor, feature_info: Dict) -> Dict:
     """Count invalid one-hot encodings."""
     recon_np = reconstructed.detach().cpu().numpy()
