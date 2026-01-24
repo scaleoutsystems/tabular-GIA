@@ -15,11 +15,11 @@ from leakpro.attacks.gia_attacks.invertinggradients import InvertingGradients, I
 from leakpro.fl_utils.data_utils import GiaTabularExtension
 from leakpro.utils.seed import seed_everything
 
-from tabular_metrics import evaluate_reconstruction, nearest_neighbor_distance
+from tabular_metrics import apply_matching, compute_metrics, nearest_neighbor_distance, tab_leak_accuracy, write_results_table
 
 from train import train_global_model
 from model import TabularMLP
-from tabular import get_tabular_loaders, load_tabular_config
+from tabular import get_tabular_loaders, load_tabular_config, denormalize_features
 
 
 
@@ -149,6 +149,92 @@ def get_set_dataloaders(cfg: dict, saved_encoder_meta: dict | None) -> tuple[dic
     return loaders, loaders["data_mean"], loaders["data_std"]
 
 
+def evaluate_inversion(
+    attacker: InvertingGradients,
+    orig_tensor: torch.Tensor,
+    recon_tensor: torch.Tensor,
+    encoder_meta: dict,
+    train_loader: DataLoader,
+    results_path: str,
+    label_tensor: torch.Tensor | None,
+) -> None:
+    """Centralized evaluation/logging for tabular inversion results."""
+    num_cols = encoder_meta.get("num_cols", [])
+    cat_cols = encoder_meta.get("cat_cols", [])
+    cat_categories = encoder_meta.get("cat_categories", {}) or {}
+
+    num_count = len(num_cols)
+    num_eps = np.full(num_count, 0.319, dtype=np.float32)
+
+    nn_batch = nearest_neighbor_distance(recon_tensor, orig_tensor, encoder_meta)
+    logger.info(
+        "NN distance (target batch): min=%.4f mean=%.4f median=%.4f",
+        nn_batch["min"],
+        nn_batch["mean"],
+        nn_batch["median"],
+    )
+
+    if hasattr(train_loader, "dataset"):
+        train_count = len(train_loader.dataset)
+        if train_count * recon_tensor.shape[1] <= 2.0e7:
+            train_tensor = torch.cat([batch[0] for batch in train_loader], dim=0).detach().cpu()
+            nn_train = nearest_neighbor_distance(recon_tensor, train_tensor, encoder_meta)
+            logger.info(
+                "NN distance (train set): min=%.4f mean=%.4f median=%.4f",
+                nn_train["min"],
+                nn_train["mean"],
+                nn_train["median"],
+            )
+        else:
+            logger.info(
+                "Skipped NN distance over train set (rows=%d features=%d).",
+                train_count,
+                recon_tensor.shape[1],
+            )
+
+    per_row_acc, _ = tab_leak_accuracy(
+        orig_tensor,
+        recon_tensor,
+        num_cols,
+        cat_cols,
+        cat_categories,
+        None,
+    )
+
+    # de-normalize before writing results
+    num_mean = encoder_meta.get("num_mean")
+    num_std = encoder_meta.get("num_std")
+    if num_count > 0 and num_mean is not None and num_std is not None:
+        orig_raw = denormalize_features(orig_tensor, num_mean, num_std, num_count)
+        recon_raw = denormalize_features(recon_tensor, num_mean, num_std, num_count)
+        num_std_np = np.asarray(num_std).reshape(-1)
+        if num_std_np.size >= num_count:
+            num_eps_raw = 0.319 * num_std_np[:num_count]
+        else:
+            num_eps_raw = num_eps
+    else:
+        orig_raw = orig_tensor
+        recon_raw = recon_tensor
+        num_eps_raw = num_eps
+
+    # compute rmse and mae across the reconstruction batch on the de-normalized data
+    metrics = compute_metrics(orig_raw, recon_raw, encoder_meta)
+
+    write_results_table(
+        results_path,
+        orig_raw,
+        recon_raw,
+        num_cols,
+        cat_cols,
+        cat_categories,
+        num_eps_raw,
+        label_tensor,
+        per_row_acc,
+        nn_batch,
+        metrics,
+    )
+
+
 def run_attack(model: TabularMLP, client_loader: DataLoader, data_mean: torch.Tensor, data_std: torch.Tensor, encoder_meta: dict, train_loader: DataLoader) -> None:
     
     # 1. Compute Public/Prior Stats
@@ -175,11 +261,15 @@ def run_attack(model: TabularMLP, client_loader: DataLoader, data_mean: torch.Te
 
     # Configure InvertingGradients
     attack_config = InvertingConfig(
-        attack_lr=0.01,
-        at_iterations=1000,
         tv_reg=0.01, # This will be ignored by generic_attack_loop because is_tabular will be true
+        attack_lr=0.03,
+        at_iterations=10000,
+        #optimizer: object = lambda : MetaSGD(),
         criterion=criterion,
-        data_extension=data_extension
+        data_extension=data_extension,
+        epochs=1,
+        #median_pooling = False,
+        #top10norms = False
     )
     
     attacker = InvertingGradients(
@@ -215,86 +305,12 @@ def run_attack(model: TabularMLP, client_loader: DataLoader, data_mean: torch.Te
         if result:
             last_result = result
             
-    if last_result is None:
-        logger.warning("No result produced.")
-        return
-
     logger.info(f"Attack complete. Final Score: {float(last_score):.4f}")
     
-    # Detailed logging
-    # InvertingGradients stores best_reconstruction as DataLoader (copied from reconstruction_loader)
-    # We need to extract the tensor
-    if attacker.best_reconstruction:
-        recon_tensor = torch.cat([batch[0] for batch in attacker.best_reconstruction], dim=0).detach().cpu()
-    else:
-        recon_tensor = torch.zeros_like(attacker.original.cpu())
-
-    orig_tensor = attacker.original.cpu()
-    
-    # De-standardize if mean/std available
-    if data_mean is not None and data_std is not None:
-        data_mean = data_mean.cpu()
-        data_std = data_std.cpu()
-        # Safe inverse transform
-        orig_raw = orig_tensor * data_std + data_mean
-        recon_raw = recon_tensor * data_std + data_mean
-    else:
-        orig_raw = orig_tensor
-        recon_raw = recon_tensor
-
-    # Show metrics
-    if last_result:
-        # last_result is GIAResults object
-        # It contains rmse_score, mae_score etc for tabular
-        logger.info(f"Final Metrics: RMSE={last_result.rmse_score:.4f}, MAE={last_result.mae_score:.4f}")
-        
-        # We can also re-calculate our custom detailed metrics if desired
-        full_metrics = evaluate_reconstruction(
-             attacker.original.to(attacker.original.device), 
-             recon_tensor.to(attacker.original.device), 
-             encoder_meta, 
-             return_per_feature=True
-        )
-        agg = full_metrics['aggregate']
-        logger.info(f"Detailed Metrics: Numerical Score={agg['numerical_score']:.4f}, Categorical Score={agg['categorical_score']:.4f}")
-        print(f"FINAL_METRICS: Numerical={agg['numerical_score']:.4f} Categorical={agg['categorical_score']:.4f}")
-
-        nn_batch = nearest_neighbor_distance(recon_tensor, orig_tensor, encoder_meta)
-        logger.info(
-            "NN distance (target batch): min=%.4f mean=%.4f median=%.4f",
-            nn_batch["min"],
-            nn_batch["mean"],
-            nn_batch["median"],
-        )
-
-        train_count = len(train_loader.dataset) if hasattr(train_loader, "dataset") else None
-        if train_count is not None:
-            est_values = train_count * recon_tensor.shape[1]
-            if est_values <= 2.0e7:
-                train_tensor = torch.cat([batch[0] for batch in train_loader], dim=0).detach().cpu()
-                nn_train = nearest_neighbor_distance(recon_tensor, train_tensor, encoder_meta)
-                logger.info(
-                    "NN distance (train set): min=%.4f mean=%.4f median=%.4f",
-                    nn_train["min"],
-                    nn_train["mean"],
-                    nn_train["median"],
-                )
-            else:
-                logger.info(
-                    "Skipped NN distance over train set (rows=%d features=%d).",
-                    train_count,
-                    recon_tensor.shape[1],
-                )
-
-    # Show best row
-    errors = torch.sum(torch.abs(orig_tensor - recon_tensor), dim=1)
-    idx_best = int(errors.argmin().item())
-    logger.info("Best row (idx=%d) original: %s", idx_best, orig_raw[idx_best].numpy())
-    logger.info("Best row (idx=%d) reconstructed: %s", idx_best, recon_raw[idx_best].numpy())
+    return attacker, last_result, data_mean, data_std, encoder_meta, train_loader
 
 
-
-def main(protocol: str = "fedsgd") -> None:
+def main(protocol: str = "fedsgd", results_path: str = "results.txt") -> None:
     seed_everything(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     base_cfg, ckpt_path = load_config()
@@ -325,11 +341,38 @@ def main(protocol: str = "fedsgd") -> None:
         "ckpt" if ckpt_std is not None else "loader",
     )
 
-    run_attack(model, client_loader, data_mean, data_std, saved_encoder_meta, loaders["train_loader"])
+    # run the attack on the model with the client data
+    attacker, last_result, data_mean, data_std, encoder_meta, train_loader = run_attack(model, client_loader, data_mean, data_std, saved_encoder_meta, loaders["train_loader"])
+
+    # metrics from attack
+    # last_result is GIAResults object. it contains rmse_score, mae_score, etc for tabular
+    if last_result is not None:
+        logger.info("Final Metrics: RMSE=%.4f, MAE=%.4f", last_result.rmse_score, last_result.mae_score)
+
+    # Extract tensors for evaluation
+    if attacker.best_reconstruction:
+        recon_tensor = torch.cat([batch[0] for batch in attacker.best_reconstruction], dim=0).detach().cpu()
+    else:
+        recon_tensor = torch.zeros_like(attacker.original.cpu())
+    orig_tensor = attacker.original.detach().cpu()
+
+    labels = getattr(attacker, "reconstruction_labels", None)
+    if labels is None:
+        label_tensor = None
+    elif isinstance(labels, list):
+        label_tensor = torch.stack(labels).view(-1).detach().cpu()
+    else:
+        label_tensor = torch.as_tensor(labels).view(-1).detach().cpu()
+
+    # apply hungarian matching
+    orig_tensor, recon_tensor, label_tensor = apply_matching(orig_tensor, recon_tensor, label_tensor)
+    # run evaluation of the attack
+    evaluate_inversion(attacker, orig_tensor, recon_tensor, encoder_meta, train_loader, results_path, label_tensor)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Tabular GIA demo")
     parser.add_argument("--protocol", choices=["fedavg", "fedsgd"], default="fedsgd", help="Full client split (fedavg) or single mini-batch (fedsgd)")
+    parser.add_argument("--results-path", default="results.txt", help="Results path")
     parsed = parser.parse_args()
-    main(protocol=parsed.protocol)
+    main(protocol=parsed.protocol, results_path=parsed.results_path)

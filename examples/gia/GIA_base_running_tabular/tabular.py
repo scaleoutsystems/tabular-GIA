@@ -186,6 +186,19 @@ def _apply_encoders(X: pd.DataFrame, meta: dict[str, Any], cfg: dict[str, Any]) 
 	return pd.concat([X_num, X_cat], axis=1) if len(X_num.columns) and len(X_cat.columns) else (X_num if len(X_num.columns) else X_cat)
 
 
+def denormalize_features(x: torch.Tensor, num_mean: Any, num_std: Any, num_count: int) -> torch.Tensor:
+	"""Denormalize numeric features in a mixed tabular tensor."""
+	if num_count <= 0 or x.numel() == 0:
+		return x
+	mean_t = torch.as_tensor(num_mean, dtype=x.dtype, device=x.device).view(1, -1)
+	std_t = torch.as_tensor(num_std, dtype=x.dtype, device=x.device).view(1, -1)
+	if mean_t.shape[1] < num_count or std_t.shape[1] < num_count:
+		return x
+	out = x.clone()
+	out[:, :num_count] = out[:, :num_count] * std_t[:, :num_count] + mean_t[:, :num_count]
+	return out
+
+
 def _encode_target_train(y: pd.Series, mode: str, provided_classes: list[Any] | None = None) -> tuple[torch.Tensor, int, list[Any] | None, str]:
 	"""Encode training targets using the pre-decided mode and classes."""
 	if mode == "classification":
