@@ -1,3 +1,4 @@
 target: 54
 no_header: true
 missing_values: ""
+categorical_columns: []

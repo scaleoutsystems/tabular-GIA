@@ -133,8 +133,8 @@ class AbstractGIA(AbstractAttack):
                     logger.info(f"New best loss: {loss} on round: {i}")
 
                 # Enforce constraints if data extension supports it (e.g., Tabular)
-                if i % 100 == 0 and hasattr(configs.data_extension, 'enforce_constraints'):
-                    reconstruction.data = configs.data_extension.enforce_constraints(reconstruction.data)
+                #if i % 100 == 0 and hasattr(configs.data_extension, 'enforce_constraints'):
+                #    reconstruction.data = configs.data_extension.enforce_constraints(reconstruction.data)
 
                 if i % 250 == 0:
                     logger.info(f"Iteration {i}, loss {loss}")
@@ -169,8 +169,8 @@ class AbstractGIA(AbstractAttack):
             # Re-collect tensor from loader
             recon_tensor = torch.cat([batch[0] for batch in self.best_reconstruction], dim=0)
             
-            if hasattr(configs.data_extension, 'enforce_constraints'):
-                 recon_tensor = configs.data_extension.enforce_constraints(recon_tensor)
+            #if hasattr(configs.data_extension, 'enforce_constraints'):
+            #     recon_tensor = configs.data_extension.enforce_constraints(recon_tensor)
             
             mse = torch.mean((orig_tensor - recon_tensor) ** 2).item()
             mae = torch.mean(torch.abs(orig_tensor - recon_tensor)).item()

@@ -1,2 +1,3 @@
 target: median_house_value
 missing_values: ""
+categorical_columns: []

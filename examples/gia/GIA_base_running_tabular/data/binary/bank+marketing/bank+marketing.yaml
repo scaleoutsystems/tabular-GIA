@@ -1,2 +1,12 @@
 target: y
 missing_values: unkown
+categorical_columns:
+  - job
+  - marital
+  - education
+  - default
+  - housing
+  - loan
+  - contact
+  - month
+  - poutcome
