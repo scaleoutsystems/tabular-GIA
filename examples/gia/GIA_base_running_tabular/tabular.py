@@ -190,8 +190,10 @@ def denormalize_features(x: torch.Tensor, num_mean: Any, num_std: Any, num_count
 	"""Denormalize numeric features in a mixed tabular tensor."""
 	if num_count <= 0 or x.numel() == 0:
 		return x
-	mean_t = torch.as_tensor(num_mean, dtype=x.dtype, device=x.device).view(1, -1)
-	std_t = torch.as_tensor(num_std, dtype=x.dtype, device=x.device).view(1, -1)
+	mean_arr = np.asarray(num_mean)
+	std_arr = np.asarray(num_std)
+	mean_t = torch.as_tensor(mean_arr, dtype=x.dtype, device=x.device).view(1, -1)
+	std_t = torch.as_tensor(std_arr, dtype=x.dtype, device=x.device).view(1, -1)
 	if mean_t.shape[1] < num_count or std_t.shape[1] < num_count:
 		return x
 	out = x.clone()
@@ -462,12 +464,44 @@ def get_tabular_loaders(
 
 	cfg = cfg or {}
 	result = load_tabular_dataset(cfg, encoder_meta=encoder_meta)
+	num_workers = int(cfg.get("num_workers", 8))
+	pin_memory = bool(cfg.get("pin_memory", torch.cuda.is_available()))
+	persistent_workers = bool(cfg.get("persistent_workers", num_workers > 0))
+	batch_size = int(cfg.get("batch_size", 64))
 
 	loaders: dict[str, Any] = {
-		"train_loader": DataLoader(result["train_ds"], batch_size=cfg.get("batch_size", 64), shuffle=True),
-		"val_loader": DataLoader(result["val_ds"], batch_size=cfg.get("batch_size", 64), shuffle=False) if result["val_ds"] is not None else None,
-		"test_loader": DataLoader(result["test_ds"], batch_size=cfg.get("batch_size", 64), shuffle=False) if result["test_ds"] is not None else None,
-		"client_loader": DataLoader(result["client_ds"], batch_size=cfg.get("batch_size", 64), shuffle=True),
+		"train_loader": DataLoader(
+			result["train_ds"],
+			batch_size=batch_size,
+			shuffle=True,
+			num_workers=num_workers,
+			pin_memory=pin_memory,
+			persistent_workers=persistent_workers,
+		),
+		"val_loader": DataLoader(
+			result["val_ds"],
+			batch_size=batch_size,
+			shuffle=False,
+			num_workers=num_workers,
+			pin_memory=pin_memory,
+			persistent_workers=persistent_workers,
+		) if result["val_ds"] is not None else None,
+		"test_loader": DataLoader(
+			result["test_ds"],
+			batch_size=batch_size,
+			shuffle=False,
+			num_workers=num_workers,
+			pin_memory=pin_memory,
+			persistent_workers=persistent_workers,
+		) if result["test_ds"] is not None else None,
+		"client_loader": DataLoader(
+			result["client_ds"],
+			batch_size=batch_size,
+			shuffle=True,
+			num_workers=num_workers,
+			pin_memory=pin_memory,
+			persistent_workers=persistent_workers,
+		),
 		"data_mean": result["data_mean"],
 		"data_std": result["data_std"],
 		"n_features": result["n_features"],

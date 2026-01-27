@@ -7,8 +7,13 @@ dataset:
 
   #data_path: data/regression/california_housing/california_housing.csv
   #meta_path: data/regression/california_housing/california_housing.yaml
+
+  # dataloader speedups
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
   
-  batch_size: 128
+  batch_size: 256
   seed: 42
   normalize_numeric: true
   one_hot_categoricals: true
@@ -18,6 +23,8 @@ dataset:
 
 trainer:
   optimizer: adamw
+  # use mixed precision float16
+  amp: false
   epochs: 100
   lr: 0.01
   weight_decay: 0.0001
