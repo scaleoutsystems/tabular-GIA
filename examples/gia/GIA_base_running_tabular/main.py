@@ -312,7 +312,13 @@ def run_attack(model: TabularMLP, client_loader: DataLoader, data_mean: torch.Te
 
 def main(protocol: str = "fedsgd", results_path: str = "results.txt") -> None:
     seed_everything(42)
+    torch.backends.cudnn.benchmark = True
+    torch.set_float32_matmul_precision("high")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        logger.info("Using CUDA: %s", torch.cuda.get_device_name(device))
+    else:
+        logger.info("Using CPU")
     base_cfg, ckpt_path = load_config()
     if not ckpt_path.exists():
         ckpt_path, _ = train_global_model(base_cfg)
@@ -321,11 +327,11 @@ def main(protocol: str = "fedsgd", results_path: str = "results.txt") -> None:
     model = model.to(device)
     loaders, data_mean_loader, data_std_loader = get_set_dataloaders(base_cfg, saved_encoder_meta)
 
-    client_loader = _move_loader_to_device(loaders["client_loader"], device)
+    client_loader = loaders["client_loader"]
     if protocol == "fedsgd":
         xb, yb = next(iter(client_loader))
         fedsgd_ds = TensorDataset(xb, yb)
-        client_loader = _move_loader_to_device(DataLoader(fedsgd_ds, batch_size=len(xb), shuffle=False), device)
+        client_loader = DataLoader(fedsgd_ds, batch_size=len(xb), shuffle=False)
         logger.info("Protocol=fedsgd: using single batch of size %d from client split (orig size=%d)", len(xb), len(loaders["client_loader"].dataset))
     else:
         logger.info("Protocol=fedavg: using full client split (size=%d)", len(client_loader.dataset))

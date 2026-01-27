@@ -3,8 +3,10 @@
 import logging
 from pathlib import Path
 from typing import Dict, Tuple
+import time
 
 import torch
+from torch.amp import GradScaler, autocast
 from torch import nn
 from torch.utils.data import DataLoader
 
@@ -50,39 +52,55 @@ def run_epoch(
 	metric_classes: int,
 	optimizer: torch.optim.Optimizer | None = None,
 	device: torch.device | None = None,
+	scaler: GradScaler | None = None,
+	use_amp: bool = False,
 ) -> Dict[str, float | torch.Tensor | int]:
 	train_mode = optimizer is not None
 	model.train() if train_mode else model.eval()
 
 	loss_sum = correct = total = 0.0
+	data_time = 0.0
+	compute_time = 0.0
 	cm = torch.zeros((metric_classes, metric_classes), dtype=torch.long) if (is_binary or is_multiclass) else None
 	abs_err = ss_res = sum_y = sum_y2 = 0.0
 
 	with torch.enable_grad() if train_mode else torch.no_grad():
 		for xb, yb in loader:
-			xb = xb.to(device) if device is not None else xb
-			yb = yb.to(device) if device is not None else yb
-			logits = model(xb)
-			if is_binary:
-				yb_t = yb.float().view(-1, 1)
-				loss = criterion(logits, yb_t)
-				preds = (torch.sigmoid(logits).view(-1) > 0.5).long()
-			elif is_multiclass:
-				loss = criterion(logits, yb)
-				preds = logits.argmax(dim=1)
+			t0 = time.perf_counter()
+			if device is not None and device.type == "cuda":
+				xb = xb.to(device, non_blocking=True)
+				yb = yb.to(device, non_blocking=True)
 			else:
-				preds = logits.view(-1)
-				yb_t = yb.view(-1)
-				loss = criterion(preds, yb_t)
-				abs_err += (preds - yb_t).abs().sum().item()
-				ss_res += ((preds - yb_t) ** 2).sum().item()
-				sum_y += yb_t.sum().item()
-				sum_y2 += (yb_t ** 2).sum().item()
+				xb = xb.to(device) if device is not None else xb
+				yb = yb.to(device) if device is not None else yb
+			t1 = time.perf_counter()
+			with autocast(device_type=device.type if device is not None else "cpu", enabled=train_mode and use_amp):
+				logits = model(xb)
+				if is_binary:
+					yb_t = yb.float().view(-1, 1)
+					loss = criterion(logits, yb_t)
+					preds = (torch.sigmoid(logits).view(-1) > 0.5).long()
+				elif is_multiclass:
+					loss = criterion(logits, yb)
+					preds = logits.argmax(dim=1)
+				else:
+					preds = logits.view(-1)
+					yb_t = yb.view(-1)
+					loss = criterion(preds, yb_t)
+					abs_err += (preds - yb_t).abs().sum().item()
+					ss_res += ((preds - yb_t) ** 2).sum().item()
+					sum_y += yb_t.sum().item()
+					sum_y2 += (yb_t ** 2).sum().item()
 
 			if train_mode:
 				optimizer.zero_grad()
-				loss.backward()
-				optimizer.step()
+				if scaler is not None:
+					scaler.scale(loss).backward()
+					scaler.step(optimizer)
+					scaler.update()
+				else:
+					loss.backward()
+					optimizer.step()
 
 			loss_sum += loss.item() * yb.size(0)
 			total += yb.numel()
@@ -90,6 +108,9 @@ def run_epoch(
 				correct += (preds == yb.view(-1)).sum().item()
 				idx = preds.cpu() * metric_classes + yb.view(-1).long().cpu()
 				cm += torch.bincount(idx, minlength=metric_classes * metric_classes).view(metric_classes, metric_classes)
+			t2 = time.perf_counter()
+			data_time += (t1 - t0)
+			compute_time += (t2 - t1)
 
 	return {
 		"loss": loss_sum / max(1, total),
@@ -100,6 +121,8 @@ def run_epoch(
 		"sum_y": sum_y,
 		"sum_y2": sum_y2,
 		"total": total,
+		"data_time": data_time,
+		"compute_time": compute_time,
 	}
 
 
@@ -116,7 +139,7 @@ def log_classification(epoch: int, epochs: int, lr: float, train_stats: Dict, va
 		train_f1 = _macro_f1(train_stats["cm"].to(torch.float32))
 		val_f1 = _macro_f1(val_stats["cm"].to(torch.float32))
 		logger.info(
-			"Epoch %d/%d - lr=%.5f train_acc=%.4f val_acc=%.4f train_f1=%.4f val_f1=%.4f train_loss=%.4f val_loss=%.4f",
+			"Epoch %d/%d - lr=%.5f train_acc=%.4f val_acc=%.4f train_f1=%.4f val_f1=%.4f train_loss=%.4f val_loss=%.4f | train data=%.4fs compute=%.4fs",
 			epoch + 1,
 			epochs,
 			lr,
@@ -126,10 +149,12 @@ def log_classification(epoch: int, epochs: int, lr: float, train_stats: Dict, va
 			val_f1,
 			train_stats["loss"],
 			val_stats["loss"],
+			train_stats["data_time"],
+			train_stats["compute_time"],
 		)
 	else:
 		logger.info(
-			"Epoch %d/%d - lr=%.5f train_acc=%.4f val_acc=%.4f train_loss=%.4f val_loss=%.4f",
+			"Epoch %d/%d - lr=%.5f train_acc=%.4f val_acc=%.4f train_loss=%.4f val_loss=%.4f | train data=%.4fs compute=%.4fs",
 			epoch + 1,
 			epochs,
 			lr,
@@ -137,6 +162,8 @@ def log_classification(epoch: int, epochs: int, lr: float, train_stats: Dict, va
 			val_stats["acc"],
 			train_stats["loss"],
 			val_stats["loss"],
+			train_stats["data_time"],
+			train_stats["compute_time"],
 		)
 
 
@@ -146,7 +173,7 @@ def log_regression(epoch: int, epochs: int, lr: float, train_stats: Dict, val_st
 	ss_tot = val_stats["sum_y2"] - val_stats["total"] * (y_mean ** 2)
 	val_r2 = 1.0 - (val_stats["ss_res"] / ss_tot) if ss_tot != 0 else float("nan")
 	logger.info(
-		"Epoch %d/%d - lr=%.5f train_loss=%.4f val_loss=%.4f val_mae=%.4f val_r2=%.4f",
+		"Epoch %d/%d - lr=%.5f train_loss=%.4f val_loss=%.4f val_mae=%.4f val_r2=%.4f | train data=%.4fs compute=%.4fs",
 		epoch + 1,
 		epochs,
 		lr,
@@ -154,6 +181,8 @@ def log_regression(epoch: int, epochs: int, lr: float, train_stats: Dict, val_st
 		val_stats["loss"],
 		val_mae,
 		val_r2,
+		train_stats["data_time"],
+		train_stats["compute_time"],
 	)
 
 
@@ -194,6 +223,8 @@ def train(
 	lr = trainer_cfg.get("lr", 1e-3)
 	warmup_pct = float(trainer_cfg.get("warmup_pct", 0.10))
 	min_lr_scale = float(trainer_cfg.get("min_lr_scale", 0.01))
+	use_amp = bool(trainer_cfg.get("amp", True)) and device.type == "cuda"
+	scaler = GradScaler("cuda", enabled=use_amp)
 	best_val = float("-inf") if (is_binary or is_multiclass) else float("inf")
 
 	for epoch in range(epochs):
@@ -201,8 +232,8 @@ def train(
 		for pg in optimizer.param_groups:
 			pg["lr"] = current_lr
 
-		train_stats = run_epoch(loaders["train_loader"], model, criterion, is_binary, is_multiclass, metric_classes, optimizer, device)
-		val_stats = run_epoch(loaders["val_loader"], model, criterion, is_binary, is_multiclass, metric_classes, device=device)
+		train_stats = run_epoch(loaders["train_loader"], model, criterion, is_binary, is_multiclass, metric_classes, optimizer, device, scaler=scaler, use_amp=use_amp)
+		val_stats = run_epoch(loaders["val_loader"], model, criterion, is_binary, is_multiclass, metric_classes, device=device, scaler=None, use_amp=False)
 		val_metric = val_stats["acc"] if (is_binary or is_multiclass) else -val_stats["loss"]
 
 		if is_binary or is_multiclass:
@@ -241,7 +272,13 @@ def train(
 
 def train_global_model(cfg: dict) -> Tuple[Path, float]:
 	seed_everything(cfg["seed"])
+	torch.backends.cudnn.benchmark = True
+	torch.set_float32_matmul_precision("high")
 	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+	if device.type == "cuda":
+		logger.info("Using CUDA: %s", torch.cuda.get_device_name(device))
+	else:
+		logger.info("Using CPU")
 	trainer_cfg = cfg.get("trainer", {}) or {}
 
 	data_path = Path(cfg["data_path"])
@@ -284,6 +321,7 @@ def train_global_model(cfg: dict) -> Tuple[Path, float]:
 		weight_decay=trainer_cfg.get("weight_decay", 1e-4),
 	)
 
+	start_time = time.perf_counter()
 	best_val = train(
 		model,
 		loaders,
@@ -299,6 +337,8 @@ def train_global_model(cfg: dict) -> Tuple[Path, float]:
 		encoder_meta,
 		checkpoint_path,
 	)
+	elapsed = time.perf_counter() - start_time
+	logger.info("Training time: %.2f seconds", elapsed)
 
 	if loaders.get("test_loader") is not None:
 		state = torch.load(checkpoint_path, map_location="cpu", weights_only=False)

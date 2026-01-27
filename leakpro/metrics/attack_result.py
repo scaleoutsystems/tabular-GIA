@@ -599,7 +599,7 @@ class GIAResults:
         # prevent too long config name bad hack..
         config_name = config_name[:len(config_name)//2]
         self.id = f"{name}{config_name}"
-        path = f"{path}/gradient_inversion/{self.id}"
+        path = f"{path}/gradient_inversion/{name}"
 
         if self.is_tabular:
             os.makedirs(path, exist_ok=True)
