@@ -30,3 +30,10 @@ python tabular_gia/train.py
 ## Notes
 - The evaluation matches reconstructed rows to originals using Hungarian assignment before scoring.
 - Numerical features are z-score normalized; categoricals are one-hot encoded.
+
+## Restoring upstream LeakPro
+This repo intentionally prunes unrelated LeakPro components to keep the tabular GIA case small and reproducible.
+If you want the full LeakPro functionality later, you have two options:
+
+1) Replace the `leakpro/` folder with a fresh copy from the upstream LeakPro repo.
+2) Add upstream LeakPro as a submodule (or dependency) and adjust imports accordingly.
