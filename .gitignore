@@ -182,4 +182,5 @@ optuna_results.txt
 echr*
 nohup*
 tabular_gia/results.txt
+/results.txt
 tabular_gia/data/**/checkpoints/

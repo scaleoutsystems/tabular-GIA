@@ -263,7 +263,7 @@ def run_attack(model: TabularMLP, client_loader: DataLoader, data_mean: torch.Te
     attack_config = InvertingConfig(
         tv_reg=0.01, # This will be ignored by generic_attack_loop because is_tabular will be true
         attack_lr=0.03,
-        at_iterations=10000,
+        at_iterations=1000,
         #optimizer: object = lambda : MetaSGD(),
         criterion=criterion,
         data_extension=data_extension,
