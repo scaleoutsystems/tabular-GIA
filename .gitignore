@@ -164,6 +164,8 @@ cython_debug/
 
 # Ignore data and model folders
 **/data/*
+!tabular_gia/data/**
+!tabular_gia/data/**/*
 data/cifar*
 data/CINIC*
 attack_objects/
@@ -179,3 +181,6 @@ img_align_celeba
 optuna_results.txt
 echr*
 nohup*
+tabular_gia/results.txt
+/results.txt
+tabular_gia/data/**/checkpoints/
