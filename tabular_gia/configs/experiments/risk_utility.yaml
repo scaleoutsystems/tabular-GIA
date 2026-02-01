@@ -1,0 +1,24 @@
+experiment: risk_utility
+
+fl:
+  protocol: fedavg
+  rounds: 50
+  clients_per_round: 10
+  local_epochs: 1
+  normalization: client
+  iid: true
+
+model:
+  name: ft_transformer
+  hidden_dim: 128
+  depth: 4
+  dropout: 0.1
+
+attack:
+  name: inverting_gradients
+  steps: 1000
+  lr: 0.03
+
+risk:
+  baseline: prior_only
+  threshold: 0.05

@@ -1,0 +1,3 @@
+enabled: false
+clip_norm: 1.0
+noise_multiplier: 0.0

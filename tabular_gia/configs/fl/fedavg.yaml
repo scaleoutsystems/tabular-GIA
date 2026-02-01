@@ -1,0 +1,7 @@
+protocol: fedavg
+rounds: 50
+clients_per_round: 10
+local_epochs: 1
+aggregation: fedavg
+normalization: client
+iid: true
