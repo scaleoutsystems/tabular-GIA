@@ -1,0 +1,15 @@
+fedsgd:
+  invertingconfig:
+    attack_lr: 0.03
+    at_iterations: 1000
+    optimizer: MetaSGD
+    data_extension: GiaTabularExtension
+    epochs: 1
+
+fedavg:
+  invertingconfig:
+    attack_lr: 0.03
+    at_iterations: 10000
+    optimizer: MetaAdam
+    data_extension: GiaTabularExtension
+    epochs: 1 # or more

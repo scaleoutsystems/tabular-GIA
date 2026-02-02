@@ -331,3 +331,153 @@ def write_results_table(
         f.write("Batch reconstruction results\n")
         f.write(render_table(final_rows, final_headers))
         f.write("\n")
+
+
+def write_results_table_rows(
+    results_path: str,
+    orig_tensor: Tensor,
+    recon_tensor: Tensor,
+    num_cols: list[str],
+    cat_cols: list[str],
+    cat_categories: Dict,
+    num_eps: np.ndarray,
+    label_tensor: Tensor | None,
+    per_row_acc: np.ndarray,
+) -> None:
+    """Write per-row reconstruction tables only (no aggregate summary)."""
+    total_dim = orig_tensor.shape[1]
+    num_count = len(num_cols)
+    orig_num_raw = orig_tensor[:, :num_count].numpy() if num_count > 0 else np.zeros((orig_tensor.shape[0], 0), dtype=np.float32)
+    recon_num_raw = recon_tensor[:, :num_count].numpy() if num_count > 0 else np.zeros((orig_tensor.shape[0], 0), dtype=np.float32)
+
+    cat_groups: list[dict] = []
+    current_idx = num_count
+    for col in cat_cols:
+        cats = cat_categories.get(col, [])
+        if isinstance(cats, dict):
+            cats = cats.get("categories", [])
+        n_cats = len(cats)
+        if current_idx + n_cats <= total_dim and n_cats > 0:
+            cat_groups.append({"name": col, "indices": list(range(current_idx, current_idx + n_cats)), "cats": cats})
+            current_idx += n_cats
+        else:
+            if current_idx < total_dim:
+                cat_groups.append({"name": col, "indices": [current_idx], "cats": cats})
+                current_idx += 1
+
+    with open(results_path, "w", encoding="utf-8") as f:
+        for row_idx in range(orig_tensor.shape[0]):
+            row_values = []
+            recon_values = []
+            acc_values = []
+
+            if num_count > 0:
+                for j in range(num_count):
+                    row_values.append(orig_num_raw[row_idx, j])
+                    recon_values.append(recon_num_raw[row_idx, j])
+                    acc_values.append(float(abs(orig_num_raw[row_idx, j] - recon_num_raw[row_idx, j]) <= num_eps[j]))
+
+            for group in cat_groups:
+                idxs = group["indices"]
+                cats = group["cats"]
+                if len(idxs) == 1:
+                    true_code = int(round(orig_tensor[row_idx, idxs[0]].item()))
+                    pred_code = int(round(recon_tensor[row_idx, idxs[0]].item()))
+                else:
+                    true_code = int(torch.argmax(orig_tensor[row_idx, idxs]).item())
+                    pred_code = int(torch.argmax(recon_tensor[row_idx, idxs]).item())
+                true_label = cats[true_code] if 0 <= true_code < len(cats) else true_code
+                pred_label = cats[pred_code] if 0 <= pred_code < len(cats) else pred_code
+                row_values.append(true_label)
+                recon_values.append(pred_label)
+                acc_values.append(float(true_code == pred_code))
+
+            if label_tensor is not None:
+                true_label = label_tensor[row_idx].item()
+                row_values.append(true_label)
+                recon_values.append(true_label)
+                acc_values.append(1.0)
+
+            total_acc = float(per_row_acc[row_idx]) if row_idx < len(per_row_acc) else float("nan")
+            headers = num_cols + [g["name"] for g in cat_groups]
+            if label_tensor is not None:
+                headers.append("target")
+            headers.append("total_acc")
+
+            rows = [
+                ["Original", *row_values, ""],
+                ["Reconstruction", *recon_values, ""],
+                ["TabLeak accuracy", *acc_values, total_acc],
+            ]
+            f.write(f"Reconstruction {row_idx + 1}\n")
+            f.write(render_table(rows, ["", *headers]))
+            f.write("\n\n")
+
+
+def evaluate_batch_rows(
+    attacker: object,
+    feature_schema: Dict,
+    results_path: str,
+    client_idx: int,
+) -> None:
+    """Evaluate a single attack batch and write per-row reconstruction tables."""
+    num_cols = feature_schema.get("num_cols", [])
+    cat_cols = feature_schema.get("cat_cols", [])
+    cat_categories = feature_schema.get("cat_categories", {}) or {}
+
+    if getattr(attacker, "best_reconstruction", None):
+        recon_tensor = torch.cat([batch[0] for batch in attacker.best_reconstruction], dim=0).detach().cpu()
+    else:
+        recon_tensor = torch.zeros_like(attacker.original.detach().cpu())
+    orig_tensor = attacker.original.detach().cpu()
+
+    labels = getattr(attacker, "reconstruction_labels", None)
+    if labels is None:
+        label_tensor = None
+    elif isinstance(labels, list):
+        label_tensor = torch.stack(labels).view(-1).detach().cpu()
+    else:
+        label_tensor = torch.as_tensor(labels).view(-1).detach().cpu()
+
+    orig_tensor, recon_tensor, label_tensor = apply_matching(orig_tensor, recon_tensor, label_tensor)
+
+    num_count = len(num_cols)
+    if num_count > 0:
+        means = feature_schema.get("client_num_mean", [])
+        stds = feature_schema.get("client_num_std", [])
+        if client_idx < len(means) and client_idx < len(stds):
+            mean = torch.tensor(means[client_idx], dtype=orig_tensor.dtype)
+            std = torch.tensor(stds[client_idx], dtype=orig_tensor.dtype)
+            orig_tensor = orig_tensor.clone()
+            recon_tensor = recon_tensor.clone()
+            orig_tensor[:, :num_count] = (orig_tensor[:, :num_count] * std) + mean
+            recon_tensor[:, :num_count] = (recon_tensor[:, :num_count] * std) + mean
+            num_std = std.detach().cpu().numpy()
+            num_eps = 0.319 * num_std
+        else:
+            num_std = None
+            num_eps = np.full(num_count, 0.319, dtype=np.float32)
+    else:
+        num_std = None
+        num_eps = np.array([], dtype=np.float32)
+
+    per_row_acc, _ = tab_leak_accuracy(
+        orig_tensor,
+        recon_tensor,
+        num_cols,
+        cat_cols,
+        cat_categories,
+        num_std,
+    )
+
+    write_results_table_rows(
+        results_path,
+        orig_tensor,
+        recon_tensor,
+        num_cols,
+        cat_cols,
+        cat_categories,
+        num_eps,
+        label_tensor,
+        per_row_acc,
+    )
