@@ -1,0 +1,19 @@
+dataset_path: data/binary/adult/adult.csv
+dataset_meta_path: data/binary/adult/adult.yaml
+
+#dataset_path: data/multiclass/statlog+shuttle/statlog+shuttle.train.csv
+#dataset_meta_path: data/multiclass/statlog+shuttle/statlog+shuttle.yaml
+
+#dataset_path: data/regression/california_housing/california_housing.csv
+#dataset_meta_path: data/regression/california_housing/california_housing.yaml
+
+# dataloader gpu speedups
+num_workers: 8
+pin_memory: true
+persistent_workers: true
+  
+# dataloader specifics
+batch_size: 32
+train_frac: 0.70
+val_frac: 0.15
+test_frac: 0.15
