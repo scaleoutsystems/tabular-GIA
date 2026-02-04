@@ -61,6 +61,8 @@ class InvertingGradients(AbstractGIA):
         self.data_mean = data_mean
         self.data_std = data_std
         self.configs = configs if configs is not None else InvertingConfig()
+        # Keep an untouched optimizer prototype so each replay can start from fresh state.
+        self._optimizer_prototype = deepcopy(self.configs.optimizer)
         self.best_loss = float("inf")
         self.best_reconstruction = None
         self.best_reconstruction_round = None
@@ -71,6 +73,10 @@ class InvertingGradients(AbstractGIA):
         self.optuna_trial_data = optuna_trial_data
 
         logger.info("Inverting gradient initialized.")
+
+    def _new_meta_optimizer(self) -> object:
+        """Return a fresh meta-optimizer with reset internal state."""
+        return deepcopy(self._optimizer_prototype)
 
     def description(self:Self) -> dict:
         """Return a description of the attack."""
@@ -107,7 +113,7 @@ class InvertingGradients(AbstractGIA):
             self.reconstruction_loader
         ) = self.configs.data_extension.get_at_data(self.client_loader)
         self.reconstruction.requires_grad = True
-        client_gradient = self.train_fn(self.model, self.client_loader, self.configs.optimizer,
+        client_gradient = self.train_fn(self.model, self.client_loader, self._new_meta_optimizer(),
                                         self.configs.criterion, self.configs.epochs)
         self.client_gradient = [p.detach() for p in client_gradient]
 
@@ -147,7 +153,7 @@ class InvertingGradients(AbstractGIA):
             optimizer.zero_grad()
             self.model.zero_grad()
 
-            gradient = self.train_fn(self.model, self.reconstruction_loader, self.configs.optimizer,
+            gradient = self.train_fn(self.model, self.reconstruction_loader, self._new_meta_optimizer(),
                                      self.configs.criterion, self.configs.epochs)
             rec_loss = cosine_similarity_weights(gradient, self.client_gradient, self.configs.top10norms)
             if not getattr(self, "is_tabular", False):
