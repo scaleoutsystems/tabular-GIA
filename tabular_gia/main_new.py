@@ -13,7 +13,7 @@ from leakpro.utils.seed import seed_everything
 
 from fl.dataloader.tabular_dataloader import load_dataset
 from fl.fedsgd import run_fedsgd
-#from tabular_gia.fl.fedavg import run_fedavg
+from fl.fedavg import run_fedavg
 
 from model import TabularMLP1
 from tabular_metrics import evaluate_batch_rows
@@ -24,7 +24,7 @@ if not logger.handlers:
 logging.getLogger("leakpro").setLevel(logging.WARNING)
 
 
-def main(base_cfg_path: str, dataset_cfg_path: str, model_cfg_path: str, fl_cfg_path: str, gia_cfg_path: str, results_base_path: str | None = None):
+def main(base_cfg_path: str, dataset_cfg_path: str, model_cfg_path: str, gia_cfg_path: str, results_base_path: str | None = None):
     # load base.yaml
     base_cfg_path = Path(base_cfg_path)
     logger.info("Loading base config: base=%s", base_cfg_path)
@@ -53,6 +53,7 @@ def main(base_cfg_path: str, dataset_cfg_path: str, model_cfg_path: str, fl_cfg_
         model_cfg = yaml.safe_load(f) or {}
 
     # load fl cfg
+    fl_cfg_path = base_cfg_path.parent / "fl" / f"{protocol}.yaml"
     logger.info("Loading fl config: base=%s", fl_cfg_path)
     with open(fl_cfg_path, "r") as f:
         fl_cfg = yaml.safe_load(f) or {}
@@ -95,18 +96,20 @@ def main(base_cfg_path: str, dataset_cfg_path: str, model_cfg_path: str, fl_cfg_
     model.to(device)
 
     # build attack config
-    optimizer = MetaSGD() if gia_cfg.get("optimizer") == "MetaSGD" else MetaAdam()
+    lr = fl_cfg.get("lr")
+    optimizer = MetaSGD(lr=lr) if gia_cfg.get("optimizer") == "MetaSGD" else MetaAdam(lr=lr) # also set later in each attack loop for reset
     attack_cfg = InvertingConfig(
         attack_lr=gia_cfg.get("attack_lr"),
         at_iterations=gia_cfg.get("at_iterations"),
         optimizer=optimizer,
         criterion=criterion,
-        data_extension=GiaTabularExtension()
+        data_extension=GiaTabularExtension(),
+        epochs=fl_cfg.get("local_epochs")
     )
 
     # run fl training and inversion
     if protocol == "fedsgd":
-        def attack_fn(att_model, batch_loader, epoch_idx, round_idx, client_idx):
+        def attack_fn(att_model, batch_loader, epoch_idx, round_idx, client_idx, client_grads):
             attacker = InvertingGradients(
                 att_model,
                 batch_loader,
@@ -115,7 +118,71 @@ def main(base_cfg_path: str, dataset_cfg_path: str, model_cfg_path: str, fl_cfg_
                 train_fn=train_nostep,
                 configs=attack_cfg,
             )
+            attacker.configs.optimizer = MetaSGD(lr)
             attacker.prepare_attack()
+
+            # assert that the gradient computed in run_fedsgd is the same as in the GIA pipeline
+            if len(client_grads) != len(attacker.client_gradient):
+                raise AssertionError(
+                    f"Gradient length mismatch: client={len(client_grads)} attacker={len(attacker.client_gradient)}"
+                )
+            for idx, (a, b) in enumerate(zip(client_grads, attacker.client_gradient)):
+                if a is None or b is None:
+                    continue
+                if not torch.allclose(a, b, atol=1e-6, rtol=1e-5):
+                    raise AssertionError(f"Gradient mismatch at param {idx}")
+
+            # perform GIA 
+            total_iters = int(attack_cfg.at_iterations or 0)
+            last_i = -1
+            with tqdm(
+                total=total_iters, desc=f"GIA Epoch {epoch_idx} Round {round_idx} Client {client_idx}", leave=False,
+            ) as bar:
+                for i, score, _ in attacker.run_attack():
+                    step = max(0, int(i) - last_i)
+                    if step:
+                        bar.update(step)
+                    last_i = int(i)
+                    loss = -float(score) if score is not None else float("nan")
+                    best_loss = float(attacker.best_loss)
+                    bar.set_postfix(loss=f"{loss:.6f}", best=f"{best_loss:.6f}")
+                if total_iters > 0 and last_i + 1 < total_iters:
+                    bar.update(total_iters - (last_i + 1))
+
+            out_dir = results_dir / f"epoch_{epoch_idx}" / f"round_{round_idx}"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            results_path = out_dir / f"client_{client_idx}.txt"
+            evaluate_batch_rows(attacker, feature_schema, str(results_path), client_idx)
+            tqdm.write(
+                f"GIA done: epoch={epoch_idx} round={round_idx} client={client_idx} best={float(attacker.best_loss):.6f}"
+            )
+
+        run_fedsgd(fl_cfg, model, criterion, attack_fn, client_dataloaders, val_loader, test_loader)
+
+    elif protocol == "fedavg":
+        def attack_fn(att_model, batch_loader, epoch_idx, round_idx, client_idx, client_deltas):
+            attacker = InvertingGradients(
+                att_model,
+                batch_loader,
+                None,
+                None,
+                train_fn=train,
+                configs=attack_cfg,
+            )
+            attacker.configs.optimizer = MetaAdam(lr)
+            attacker.prepare_attack()
+
+            # assert that the deltas / model update computed in run_fedsgd is the same as in the GIA pipeline
+            if len(client_deltas) != len(attacker.client_gradient):
+                raise AssertionError(
+                    f"Delta length mismatch: client={len(client_deltas)} attacker={len(attacker.client_gradient)}"
+                )
+            for idx, (a, b) in enumerate(zip(client_deltas, attacker.client_gradient)):
+                if a is None or b is None:
+                    continue
+                if not torch.allclose(a, b, atol=1e-6, rtol=1e-5):
+                    raise AssertionError(f"Delta mismatch at param {idx}")
+
             total_iters = int(attack_cfg.at_iterations or 0)
             last_i = -1
             with tqdm(
@@ -129,42 +196,25 @@ def main(base_cfg_path: str, dataset_cfg_path: str, model_cfg_path: str, fl_cfg_
                         bar.update(step)
                     last_i = int(i)
                     loss = -float(score) if score is not None else float("nan")
-                    best_loss = float(attacker.best_loss) if hasattr(attacker, "best_loss") else float("nan")
+                    best_loss = float(attacker.best_loss)
                     bar.set_postfix(loss=f"{loss:.6f}", best=f"{best_loss:.6f}")
                 if total_iters > 0 and last_i + 1 < total_iters:
                     bar.update(total_iters - (last_i + 1))
+
             out_dir = results_dir / f"epoch_{epoch_idx}" / f"round_{round_idx}"
             out_dir.mkdir(parents=True, exist_ok=True)
             results_path = out_dir / f"client_{client_idx}.txt"
             evaluate_batch_rows(attacker, feature_schema, str(results_path), client_idx)
-            tqdm.write(f"GIA done: epoch={epoch_idx} round={round_idx} client={client_idx}")
-
-        run_fedsgd(fl_cfg, model, criterion, attack_fn, client_dataloaders, val_loader, test_loader)
-
-
-
-    elif protocol == "fedavg":
-        def attack_fn(att_model, batch_loader, round_idx, client_idx):
-            attacker = InvertingGradients(
-                att_model,
-                batch_loader,
-                None,
-                None,
-                train_fn=train,
-                configs=attack_cfg,
+            tqdm.write(
+                f"GIA done: epoch={epoch_idx} round={round_idx} client={client_idx} best={float(attacker.best_loss):.6f}"
             )
-            attacker.prepare_attack()
-            for _, _, _ in attacker.run_attack():
-                pass
-            logger.info("GIA done: round=%d client=%d", round_idx, client_idx)
-        raise NotImplementedError
 
+        run_fedavg(fl_cfg, model, criterion, attack_fn, client_dataloaders, val_loader, test_loader)
 
 
 if __name__ == "__main__":
     base_cfg_path = "configs/base.yaml"
     dataset_cfg_path = "configs/dataset/dataset.yaml"
     model_cfg_path = "configs/model/model.yaml"
-    fl_cfg_path = "configs/fl/fedsgd.yaml"
     gia_cfg_path = "configs/gia/gia.yaml"
-    main(base_cfg_path, dataset_cfg_path, model_cfg_path, fl_cfg_path, gia_cfg_path)
+    main(base_cfg_path, dataset_cfg_path, model_cfg_path, gia_cfg_path)

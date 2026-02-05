@@ -218,9 +218,9 @@ class GiaTabularExtension(GiaDataModalityExtension):
         original = torch.cat(originals, dim=0)
         reconstruction = torch.randn_like(original)
         org_dataset = CustomTensorDataset(original, labels)
-        org_loader = DataLoader(org_dataset, batch_size=batch_size, shuffle=True)
+        org_loader = DataLoader(org_dataset, batch_size=batch_size, shuffle=False)
         reconstruction_dataset = CustomTensorDataset(reconstruction, labels)
-        reconstruction_loader = DataLoader(reconstruction_dataset, batch_size=batch_size, shuffle=True)
+        reconstruction_loader = DataLoader(reconstruction_dataset, batch_size=batch_size, shuffle=False)
 
         return org_loader, original, reconstruction, labels, reconstruction_loader
 

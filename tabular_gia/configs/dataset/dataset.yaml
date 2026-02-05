@@ -13,7 +13,7 @@ pin_memory: true
 persistent_workers: true
   
 # dataloader specifics
-batch_size: 32
+batch_size: 128
 train_frac: 0.70
 val_frac: 0.15
 test_frac: 0.15
