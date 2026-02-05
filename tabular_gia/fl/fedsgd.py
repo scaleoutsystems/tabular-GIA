@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from leakpro.fl_utils.gia_train import train_nostep
 from leakpro.fl_utils.gia_optimizers import MetaSGD
-from fl.metrics.fl_metrics import eval_epoch, infer_task_from_criterion, progress_write, round_bar
+from tabular_gia.fl.metrics.fl_metrics import eval_epoch, infer_task_from_criterion, progress_write, round_bar
 
 
 logger = logging.getLogger(__name__)
