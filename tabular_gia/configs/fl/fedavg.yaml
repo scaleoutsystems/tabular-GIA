@@ -1,3 +1,6 @@
-num_clients: 10
+full_dataset_passes: 100 # meaning how many full dataset passes
+local_steps: 1 # meaning how many batches to process. simulates data availability at clients. this scales compute. higher > fewer rounds but heavier compute per round. lower > more rounds and less compute per round
+local_epochs: 1 # meaning how many iterations of local training steps. this scales compute. higher > fewer full dataset passes but heavier compute per full dataset pass. lower > more full dataset passes and less compute per full dataset pass
+num_clients: 3
 client_participation: 1.0
 lr: 0.01

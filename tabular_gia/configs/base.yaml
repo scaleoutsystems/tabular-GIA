@@ -1,2 +1,2 @@
 seed: 42
-protocol: fedsgd #fedavg
+protocol: fedavg #fedsgd #fedavg

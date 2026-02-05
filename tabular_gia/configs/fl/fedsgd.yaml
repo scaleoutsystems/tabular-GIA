@@ -1,4 +1,6 @@
-epochs: 100 # in fedsgd meaning how many full dataset passes
+full_dataset_passes: 100 # in fedsgd meaning epochs
+local_steps: 1 # NOTE: always 1 in fedsgd. 1 single batch
+local_epochs: 1 # NOTE: always 1 in fedsgd. 1 single batch step iteration
 num_clients: 10
 client_participation: 1.0
 lr: 0.01
