@@ -76,7 +76,7 @@ class MetaSGD(MetaOptimizer):
 class MetaAdam(MetaOptimizer):
     """Implementation of Adam which perform step to a new set of parameters."""
 
-    def __init__(self: Self, lr: float = 1e-2, betas: Tuple[float, float] = (0.9, 0.999), eps: float = 1e-08,
+    def __init__(self: Self, lr: float = 1e-2, betas: Tuple[float, float] = (0.9, 0.999), eps: float = 1e-8,
                  weight_decay: float = 0) -> None:
         """Initializes the MetaAdam optimizer.
 
@@ -130,7 +130,8 @@ class MetaAdam(MetaOptimizer):
             m_hat = self.m[name] / (1 - self.beta1**self.t)
             v_hat = self.v[name] / (1 - self.beta2**self.t)
 
-            adam_grad = m_hat / (v_hat.sqrt() + self.eps)
+            # Keep epsilon inside sqrt for better numerical stability in higher-order autograd.
+            adam_grad = m_hat / (v_hat + self.eps).sqrt()
 
             new_params[name] = param - self.lr * adam_grad
         return new_params

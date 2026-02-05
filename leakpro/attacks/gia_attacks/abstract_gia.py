@@ -101,10 +101,16 @@ class AbstractGIA(AbstractAttack):
                             is_tabular: bool = False,
                             chose_best_ssim_as_final: bool = True) -> Generator[tuple[int, Tensor, GIAResults]]:
         """Generic attack loop for GIA's."""
+        def _loader_from_tensor(recon_tensor: Tensor) -> DataLoader:
+            ds_cls = reconstruction_loader.dataset.__class__
+            ds = ds_cls(recon_tensor, reconstruction_loader.dataset.labels)
+            return DataLoader(ds, batch_size=reconstruction_loader.batch_size or 32, shuffle=False)
+
         optimizer = torch.optim.Adam([reconstruction], lr=attack_lr)
         # Initialize best reconstruction fallback
-        self.best_reconstruction = deepcopy(reconstruction_loader)
-        self.final_best = deepcopy(reconstruction_loader)
+        best_reconstruction_tensor = reconstruction.detach().clone()
+        self.best_reconstruction = _loader_from_tensor(best_reconstruction_tensor)
+        self.final_best = self.best_reconstruction
         # reduce LR every 1/3 of total iterations
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
                                                             milestones=[at_iterations // 2.667,
@@ -114,8 +120,9 @@ class AbstractGIA(AbstractAttack):
             for i in range(at_iterations):
                 # loss function which does training and compares distance from reconstruction training to the real training.
                 closure = gradient_closure(optimizer)
-                pre_step_loader = deepcopy(reconstruction_loader)
+                pre_step_reconstruction = reconstruction.detach().clone()
                 loss = optimizer.step(closure)
+                loss_value = float(loss.detach().item())
                 scheduler.step()
                 with torch.no_grad():
                     if not is_tabular:
@@ -125,22 +132,23 @@ class AbstractGIA(AbstractAttack):
                         if (i +1) % 500 == 0 and median_pooling:
                             reconstruction.data = MedianPool2d(kernel_size=3, stride=1, padding=1, same=False)(reconstruction)
                 # Choose image who has given least loss
-                if loss < self.best_loss:
-                    self.best_loss = loss
+                if loss_value < self.best_loss:
+                    self.best_loss = loss_value
                     # the loader before the step was the one that gave the good loss value
-                    self.best_reconstruction = deepcopy(pre_step_loader)
+                    best_reconstruction_tensor = pre_step_reconstruction
+                    self.best_reconstruction = _loader_from_tensor(best_reconstruction_tensor)
                     self.best_reconstruction_round = i
-                    logger.info(f"New best loss: {loss} on round: {i}")
+                    logger.info(f"New best loss: {self.best_loss} on round: {i}")
 
                 # Enforce constraints if data extension supports it (e.g., Tabular)
                 #if i % 100 == 0 and hasattr(configs.data_extension, 'enforce_constraints'):
                 #    reconstruction.data = configs.data_extension.enforce_constraints(reconstruction.data)
 
                 if i % 250 == 0:
-                    logger.info(f"Iteration {i}, loss {loss}")
+                    logger.info(f"Iteration {i}, loss {loss_value}")
                     if is_tabular:
                         # For tabular, track the best loss as similarity proxy
-                        yield i, -float(loss), None
+                        yield i, -self.best_loss, None
                     else:
                         ssim = dataloaders_ssim_ignite(client_loader, self.best_reconstruction)
                         if ssim > self.best_sim:
@@ -167,8 +175,8 @@ class AbstractGIA(AbstractAttack):
             # Compute simple tabular reconstruction metrics
             orig_tensor = torch.cat([batch[0] for batch in client_loader], dim=0)
             
-            # Re-collect tensor from loader
-            recon_tensor = torch.cat([batch[0] for batch in self.best_reconstruction], dim=0)
+            # Re-collect tensor from best reconstruction snapshot
+            recon_tensor = best_reconstruction_tensor
             
             #if hasattr(configs.data_extension, 'enforce_constraints'):
             #     recon_tensor = configs.data_extension.enforce_constraints(recon_tensor)
