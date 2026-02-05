@@ -3,4 +3,5 @@ local_steps: 1 # meaning how many batches to process. simulates data availabilit
 local_epochs: 1 # meaning how many iterations of local training steps. this scales compute. higher > fewer full dataset passes but heavier compute per full dataset pass. lower > more full dataset passes and less compute per full dataset pass
 num_clients: 3
 client_participation: 1.0
+optimizer: MetaSGD
 lr: 0.01

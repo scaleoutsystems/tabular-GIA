@@ -16,7 +16,7 @@ if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
 
-def run_fedavg(cfg, global_model, criterion, attack_fn, client_dataloaders, val, test):
+def run_fedavg(cfg, global_model, criterion, optimizer_fn, attack_fn, client_dataloaders, val, test):
     # 1. parse fedavg cfg
     full_dataset_passes = cfg.get("full_dataset_passes")
     local_steps = cfg.get("local_steps", 1)
@@ -25,6 +25,7 @@ def run_fedavg(cfg, global_model, criterion, attack_fn, client_dataloaders, val,
     num_clients = len(client_dataloaders)
     client_participation = cfg.get("client_participation")
     lr = cfg.get("lr")
+    optimizer = cfg.get("optimizer")
 
     # 1.1 derive expected rounds per epoch from batch size, local_steps, participation, num_clients, and dataset size(s)
     # batch_size * local_steps * num_clients * participation * rounds = len(data)
@@ -77,7 +78,7 @@ def run_fedavg(cfg, global_model, criterion, attack_fn, client_dataloaders, val,
                     batch_loader = DataLoader(batch_ds, batch_size=batch_size, shuffle=False)
                     samples_seen = len(labels_cat) * local_epochs
 
-                    deltas = train(global_model, batch_loader, MetaAdam(lr), criterion, epochs=local_epochs)
+                    deltas = train(global_model, batch_loader, optimizer_fn(optimizer, lr), criterion, epochs=local_epochs)
                     client_updates.append((deltas, samples_seen))
                     selected += 1
 

@@ -11,7 +11,7 @@ dataset_meta_path: data/binary/adult/adult.yaml
 num_workers: 8
 pin_memory: true
 persistent_workers: true
-  
+
 # dataloader specifics
 batch_size: 128
 train_frac: 0.70
