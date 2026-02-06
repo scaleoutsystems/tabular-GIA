@@ -22,6 +22,7 @@ from leakpro.fl_utils.gia_train import train_nostep, train
 from leakpro.utils.seed import seed_everything
 
 from tabular_gia.fl.dataloader.tabular_dataloader import load_dataset
+from tabular_gia.fl.fedavg import run_fedavg
 from tabular_gia.fl.fedsgd import run_fedsgd
 from tabular_gia.fl.metrics.fl_metrics import eval_epoch, infer_task_from_criterion
 from tabular_gia.model import TabularMLP1, TabularMLP2, TabularMLP
@@ -32,6 +33,8 @@ logger = logging.getLogger(__name__)
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 logging.getLogger("leakpro").setLevel(logging.WARNING)
+
+SUPPORTED_PROTOCOLS = {"fedsgd", "fedavg"}
 
 
 def _load_yaml(path: str | Path) -> dict:
@@ -75,6 +78,13 @@ def _build_model(model_cfg: dict, feature_schema: dict, task: str) -> torch.nn.M
     )
 
 
+def _optimizer_fn(name: str | None, lr: float) -> MetaAdam | MetaSGD:
+    opt = (name or "MetaAdam").lower()
+    if opt == "metasgd":
+        return MetaSGD(lr)
+    return MetaAdam(lr)
+
+
 def run_experiment(
     base_cfg_path: str,
     dataset_cfg_path: str,
@@ -94,6 +104,10 @@ def run_experiment(
     base_cfg = _load_yaml(base_cfg_path)
     protocol = base_cfg.get("protocol", "fedsgd")
     seed = int(base_cfg.get("seed", 42))
+    if protocol not in SUPPORTED_PROTOCOLS:
+        raise ValueError(
+            f"Unsupported protocol: {protocol}. Choose one of: {', '.join(sorted(SUPPORTED_PROTOCOLS))}."
+        )
 
     seed_everything(seed)
     torch.backends.cudnn.benchmark = False
@@ -116,11 +130,12 @@ def run_experiment(
     gia_cfg = gia_cfg.get(protocol, {}).get("invertingconfig", {})
 
     if quick:
+        logger.info("Quick mode: forcing tiny config (batch_size<=16, full_dataset_passes=1, at_iterations<=10).")
         ds_cfg["batch_size"] = min(int(ds_cfg.get("batch_size", 32)), 16)
         ds_cfg["num_workers"] = 0
         ds_cfg["pin_memory"] = False
         ds_cfg["persistent_workers"] = False
-        fl_cfg["epochs"] = min(int(fl_cfg.get("epochs", 1)), 1)
+        fl_cfg["full_dataset_passes"] = 1
         fl_cfg["client_participation"] = min(float(fl_cfg.get("client_participation", 1.0)), 0.2)
         gia_cfg["at_iterations"] = min(int(gia_cfg.get("at_iterations", 10)), 10)
 
@@ -155,7 +170,7 @@ def run_experiment(
         data_extension=GiaTabularExtension(),
     )
 
-    def attack_fn(att_model, batch_loader, epoch_idx, round_idx, client_idx):
+    def attack_fn(att_model, batch_loader, epoch_idx, round_idx, client_idx, *_):
         if quick and (epoch_idx > 1 or round_idx > 1):
             return
         attacker = InvertingGradients(
@@ -193,8 +208,19 @@ def run_experiment(
 
     if protocol == "fedsgd":
         run_fedsgd(fl_cfg, model, criterion, attack_fn, client_dataloaders, val_loader, test_loader)
+    elif protocol == "fedavg":
+        run_fedavg(
+            fl_cfg,
+            model,
+            criterion,
+            _optimizer_fn,
+            attack_fn,
+            client_dataloaders,
+            val_loader,
+            test_loader,
+        )
     else:
-        raise NotImplementedError("FedAvg not wired yet in experiments runner.")
+        raise ValueError(f"Unsupported protocol: {protocol}")
 
     task = infer_task_from_criterion(criterion)
     train_stats = eval_epoch(client_dataloaders, model, criterion, task)
@@ -218,7 +244,11 @@ def main() -> None:
     parser.add_argument("--fl", default=str(default_cfg_dir / "fl" / "fedsgd.yaml"))
     parser.add_argument("--gia", default=str(default_cfg_dir / "gia" / "gia.yaml"))
     parser.add_argument("--results", default=None)
-    parser.add_argument("--quick", action="store_true", help="Run a small, fast config for local sanity checks.")
+    parser.add_argument(
+        "--quick",
+        action="store_true",
+        help="Run a small, fast config for local sanity checks (forces full_dataset_passes=1).",
+    )
     args = parser.parse_args()
 
     run_experiment(args.base, args.dataset, args.model, args.fl, args.gia, args.results, args.quick)
