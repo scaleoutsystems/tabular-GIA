@@ -419,7 +419,7 @@ def evaluate_batch_rows(
     feature_schema: Dict,
     results_path: str,
     client_idx: int,
-) -> None:
+) -> Dict:
     """Evaluate a single attack batch and write per-row reconstruction tables."""
     num_cols = feature_schema.get("num_cols", [])
     cat_cols = feature_schema.get("cat_cols", [])
@@ -461,7 +461,7 @@ def evaluate_batch_rows(
         num_std = None
         num_eps = np.array([], dtype=np.float32)
 
-    per_row_acc, _ = tab_leak_accuracy(
+    per_row_acc, batch_acc = tab_leak_accuracy(
         orig_tensor,
         recon_tensor,
         num_cols,
@@ -469,6 +469,8 @@ def evaluate_batch_rows(
         cat_categories,
         num_std,
     )
+
+    metrics = compute_metrics(orig_tensor, recon_tensor, feature_schema)
 
     write_results_table_rows(
         results_path,
@@ -481,3 +483,9 @@ def evaluate_batch_rows(
         label_tensor,
         per_row_acc,
     )
+    return {
+        "batch_acc": float(batch_acc),
+        "mae": float(metrics.get("mae", 0.0)),
+        "rmse": float(metrics.get("rmse", 0.0)),
+        "categorical_accuracy": float(metrics.get("categorical_accuracy", 0.0)),
+    }
