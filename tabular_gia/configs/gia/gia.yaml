@@ -2,12 +2,10 @@ fedsgd:
   invertingconfig:
     attack_lr: 0.03
     at_iterations: 1000
-    optimizer: MetaSGD
     data_extension: GiaTabularExtension
 
 fedavg:
   invertingconfig:
     attack_lr: 0.03
     at_iterations: 1000
-    optimizer: MetaAdam
     data_extension: GiaTabularExtension

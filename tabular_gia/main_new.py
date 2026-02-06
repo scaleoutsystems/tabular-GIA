@@ -2,6 +2,7 @@ import argparse
 import logging
 import yaml
 from pathlib import Path
+from copy import deepcopy
 
 import torch
 from tqdm import tqdm
@@ -97,11 +98,15 @@ def main(base_cfg_path: str, dataset_cfg_path: str, model_cfg_path: str, gia_cfg
 
     # build attack config
     lr = fl_cfg.get("lr")
-    optimizer = MetaSGD(lr=lr) if gia_cfg.get("optimizer") == "MetaSGD" else MetaAdam(lr=lr) # also set later in each attack loop for reset
-    attack_cfg = InvertingConfig(
+    optimizer = fl_cfg.get("optimizer")
+    logging.info(f"Optimizer: {optimizer}")
+    def optimizer_fn(optimizer, lr):
+        return MetaAdam(lr=lr) if optimizer == "MetaAdam" else MetaSGD(lr=lr)
+
+    attack_cfg_base = InvertingConfig(
         attack_lr=gia_cfg.get("attack_lr"),
         at_iterations=gia_cfg.get("at_iterations"),
-        optimizer=optimizer,
+        optimizer=optimizer_fn(optimizer, lr),
         criterion=criterion,
         data_extension=GiaTabularExtension(),
         epochs=fl_cfg.get("local_epochs")
@@ -110,6 +115,8 @@ def main(base_cfg_path: str, dataset_cfg_path: str, model_cfg_path: str, gia_cfg
     # run fl training and inversion
     if protocol == "fedsgd":
         def attack_fn(att_model, batch_loader, epoch_idx, round_idx, client_idx, client_grads):
+            # fresh config per attack instance to avoid cross-attack state sharing
+            attack_cfg = deepcopy(attack_cfg_base)
             attacker = InvertingGradients(
                 att_model,
                 batch_loader,
@@ -118,7 +125,6 @@ def main(base_cfg_path: str, dataset_cfg_path: str, model_cfg_path: str, gia_cfg
                 train_fn=train_nostep,
                 configs=attack_cfg,
             )
-            attacker.configs.optimizer = MetaSGD(lr)
             attacker.prepare_attack()
 
             # assert that the gradient computed in run_fedsgd is the same as in the GIA pipeline
@@ -154,13 +160,16 @@ def main(base_cfg_path: str, dataset_cfg_path: str, model_cfg_path: str, gia_cfg
             results_path = out_dir / f"client_{client_idx}.txt"
             evaluate_batch_rows(attacker, feature_schema, str(results_path), client_idx)
             tqdm.write(
-                f"GIA done: epoch={epoch_idx} round={round_idx} client={client_idx} best={float(attacker.best_loss):.6f}"
+                f"GIA done: epoch={epoch_idx} round={round_idx} client={client_idx} "
+                f"best={float(attacker.best_loss):.6f}"
             )
 
         run_fedsgd(fl_cfg, model, criterion, attack_fn, client_dataloaders, val_loader, test_loader)
 
     elif protocol == "fedavg":
         def attack_fn(att_model, batch_loader, epoch_idx, round_idx, client_idx, client_deltas):
+            # fresh config per attack instance to avoid cross-attack state sharing
+            attack_cfg = deepcopy(attack_cfg_base)
             attacker = InvertingGradients(
                 att_model,
                 batch_loader,
@@ -169,10 +178,9 @@ def main(base_cfg_path: str, dataset_cfg_path: str, model_cfg_path: str, gia_cfg
                 train_fn=train,
                 configs=attack_cfg,
             )
-            attacker.configs.optimizer = MetaAdam(lr)
             attacker.prepare_attack()
 
-            # assert that the deltas / model update computed in run_fedsgd is the same as in the GIA pipeline
+            # assert that the deltas / model update computed in run_fedavg is the same as in the GIA pipeline
             if len(client_deltas) != len(attacker.client_gradient):
                 raise AssertionError(
                     f"Delta length mismatch: client={len(client_deltas)} attacker={len(attacker.client_gradient)}"
@@ -206,10 +214,11 @@ def main(base_cfg_path: str, dataset_cfg_path: str, model_cfg_path: str, gia_cfg
             results_path = out_dir / f"client_{client_idx}.txt"
             evaluate_batch_rows(attacker, feature_schema, str(results_path), client_idx)
             tqdm.write(
-                f"GIA done: epoch={epoch_idx} round={round_idx} client={client_idx} best={float(attacker.best_loss):.6f}"
+                f"GIA done: epoch={epoch_idx} round={round_idx} client={client_idx} "
+                f"best={float(attacker.best_loss):.6f}"
             )
 
-        run_fedavg(fl_cfg, model, criterion, attack_fn, client_dataloaders, val_loader, test_loader)
+        run_fedavg(fl_cfg, model, criterion, optimizer_fn, attack_fn, client_dataloaders, val_loader, test_loader)
 
 
 if __name__ == "__main__":
