@@ -85,23 +85,19 @@ def _optimizer_fn(name: str | None, lr: float) -> MetaAdam | MetaSGD:
     return MetaAdam(lr)
 
 
-def run_experiment(
-    base_cfg_path: str,
-    dataset_cfg_path: str,
-    model_cfg_path: str,
-    fl_cfg_path: str,
-    gia_cfg_path: str,
+def _run_experiment_cfgs(
+    base_cfg: dict,
+    ds_cfg: dict,
+    model_cfg: dict,
+    fl_cfg: dict,
+    gia_cfg_root: dict,
     results_base_path: str | None = None,
     quick: bool = False,
+    base_dir: Path | None = None,
 ) -> dict[str, Any]:
-    base_dir = Path(__file__).resolve().parents[1]
-    base_cfg_path = _resolve_path(base_dir, base_cfg_path)
-    dataset_cfg_path = _resolve_path(base_dir, dataset_cfg_path)
-    model_cfg_path = _resolve_path(base_dir, model_cfg_path)
-    fl_cfg_path = _resolve_path(base_dir, fl_cfg_path)
-    gia_cfg_path = _resolve_path(base_dir, gia_cfg_path)
+    if base_dir is None:
+        base_dir = Path(__file__).resolve().parents[1]
 
-    base_cfg = _load_yaml(base_cfg_path)
     protocol = base_cfg.get("protocol", "fedsgd")
     seed = int(base_cfg.get("seed", 42))
     if protocol not in SUPPORTED_PROTOCOLS:
@@ -115,19 +111,22 @@ def run_experiment(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("Using device: %s", device)
 
-    ds_cfg = _load_yaml(dataset_cfg_path)
     dataset_path = _resolve_path(base_dir, ds_cfg.get("dataset_path"))
     dataset_meta_path = _resolve_path(base_dir, ds_cfg.get("dataset_meta_path"))
     if dataset_path is not None:
         ds_cfg["dataset_path"] = str(dataset_path)
     if dataset_meta_path is not None:
         ds_cfg["dataset_meta_path"] = str(dataset_meta_path)
-    model_cfg = _load_yaml(model_cfg_path)
-    fl_cfg = _load_yaml(fl_cfg_path)
     fl_cfg["batch_size"] = ds_cfg.get("batch_size")
 
-    gia_cfg = _load_yaml(gia_cfg_path)
-    gia_cfg = gia_cfg.get(protocol, {}).get("invertingconfig", {})
+    gia_cfg = gia_cfg_root.get(protocol, {}).get("invertingconfig", {})
+
+    if os.name == "nt":
+        if int(ds_cfg.get("num_workers", 0)) > 0:
+            logger.info("Windows detected: forcing num_workers=0, pin_memory=False, persistent_workers=False.")
+            ds_cfg["num_workers"] = 0
+            ds_cfg["pin_memory"] = False
+            ds_cfg["persistent_workers"] = False
 
     if quick:
         logger.info("Quick mode: forcing tiny config (batch_size<=16, full_dataset_passes=1, at_iterations<=10).")
@@ -170,6 +169,8 @@ def run_experiment(
         data_extension=GiaTabularExtension(),
     )
 
+    leakage_runs: list[dict[str, float]] = []
+
     def attack_fn(att_model, batch_loader, epoch_idx, round_idx, client_idx, *_):
         if quick and (epoch_idx > 1 or round_idx > 1):
             return
@@ -203,7 +204,8 @@ def run_experiment(
         out_dir = results_dir / f"epoch_{epoch_idx}" / f"round_{round_idx}"
         out_dir.mkdir(parents=True, exist_ok=True)
         results_path = out_dir / f"client_{client_idx}.txt"
-        evaluate_batch_rows(attacker, feature_schema, str(results_path), client_idx)
+        metrics = evaluate_batch_rows(attacker, feature_schema, str(results_path), client_idx)
+        leakage_runs.append(metrics)
         tqdm.write(f"GIA done: epoch={epoch_idx} round={round_idx} client={client_idx}")
 
     if protocol == "fedsgd":
@@ -227,11 +229,57 @@ def run_experiment(
     val_stats = eval_epoch([val_loader], model, criterion, task) if val_loader is not None else None
     test_stats = eval_epoch([test_loader], model, criterion, task)
 
+    leakage_summary = None
+    if leakage_runs:
+        leakage_summary = {
+            "batch_acc": float(sum(m["batch_acc"] for m in leakage_runs) / len(leakage_runs)),
+            "mae": float(sum(m["mae"] for m in leakage_runs) / len(leakage_runs)),
+            "rmse": float(sum(m["rmse"] for m in leakage_runs) / len(leakage_runs)),
+            "categorical_accuracy": float(
+                sum(m["categorical_accuracy"] for m in leakage_runs) / len(leakage_runs)
+            ),
+        }
+
     return {
         "model": model,
         "metrics": {"train": train_stats, "val": val_stats, "test": test_stats},
         "feature_schema": feature_schema,
+        "leakage": leakage_summary,
     }
+
+
+def run_experiment(
+    base_cfg_path: str,
+    dataset_cfg_path: str,
+    model_cfg_path: str,
+    fl_cfg_path: str,
+    gia_cfg_path: str,
+    results_base_path: str | None = None,
+    quick: bool = False,
+) -> dict[str, Any]:
+    base_dir = Path(__file__).resolve().parents[1]
+    base_cfg_path = _resolve_path(base_dir, base_cfg_path)
+    dataset_cfg_path = _resolve_path(base_dir, dataset_cfg_path)
+    model_cfg_path = _resolve_path(base_dir, model_cfg_path)
+    fl_cfg_path = _resolve_path(base_dir, fl_cfg_path)
+    gia_cfg_path = _resolve_path(base_dir, gia_cfg_path)
+
+    base_cfg = _load_yaml(base_cfg_path)
+    ds_cfg = _load_yaml(dataset_cfg_path)
+    model_cfg = _load_yaml(model_cfg_path)
+    fl_cfg = _load_yaml(fl_cfg_path)
+    gia_cfg_root = _load_yaml(gia_cfg_path)
+
+    return _run_experiment_cfgs(
+        base_cfg,
+        ds_cfg,
+        model_cfg,
+        fl_cfg,
+        gia_cfg_root,
+        results_base_path=results_base_path,
+        quick=quick,
+        base_dir=base_dir,
+    )
 
 
 def main() -> None:
