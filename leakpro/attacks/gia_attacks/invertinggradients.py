@@ -22,6 +22,7 @@ from leakpro.fl_utils.similarity_measurements import (
 from leakpro.metrics.attack_result import GIAResults
 from leakpro.utils.import_helper import Callable, Self
 from leakpro.utils.logger import logger
+from leakpro.utils.seed import capture_rng_state, restore_rng_state
 
 
 @dataclass
@@ -63,6 +64,8 @@ class InvertingGradients(AbstractGIA):
         self.configs = configs if configs is not None else InvertingConfig()
         # Keep an untouched optimizer prototype so each replay can start from fresh state.
         self._optimizer_prototype = deepcopy(self.configs.optimizer)
+        self.replay_rng_state = None
+        self.is_tabular = False
         self.best_loss = float("inf")
         self.best_reconstruction = None
         self.best_reconstruction_round = None
@@ -104,7 +107,7 @@ class InvertingGradients(AbstractGIA):
             None
 
         """
-        self.model.eval()
+        self.model.train()
         (
             self.client_loader,
             self.original,
@@ -113,8 +116,14 @@ class InvertingGradients(AbstractGIA):
             self.reconstruction_loader
         ) = self.configs.data_extension.get_at_data(self.client_loader)
         self.reconstruction.requires_grad = True
+        current_state = None
+        if self.replay_rng_state is not None:
+            current_state = capture_rng_state()
+            restore_rng_state(self.replay_rng_state)
         client_gradient = self.train_fn(self.model, self.client_loader, self._new_meta_optimizer(),
                                         self.configs.criterion, self.configs.epochs)
+        if current_state is not None:
+            restore_rng_state(current_state)
         self.client_gradient = [p.detach() for p in client_gradient]
 
     def run_attack(self:Self) -> Generator[tuple[int, Tensor, GIAResults]]:
@@ -153,10 +162,15 @@ class InvertingGradients(AbstractGIA):
             optimizer.zero_grad()
             self.model.zero_grad()
 
+            if self.replay_rng_state is not None:
+                current_state = capture_rng_state()
+                restore_rng_state(self.replay_rng_state)
             gradient = self.train_fn(self.model, self.reconstruction_loader, self._new_meta_optimizer(),
                                      self.configs.criterion, self.configs.epochs)
+            if self.replay_rng_state is not None:
+                restore_rng_state(current_state)
             rec_loss = cosine_similarity_weights(gradient, self.client_gradient, self.configs.top10norms)
-            if not getattr(self, "is_tabular", False):
+            if not self.is_tabular:
                 tv_reg = (self.configs.tv_reg * total_variation(self.reconstruction))
                 rec_loss += tv_reg
             rec_loss.backward()

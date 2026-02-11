@@ -3,21 +3,21 @@ import logging
 import yaml
 from pathlib import Path
 from copy import deepcopy
-
 import torch
 from tqdm import tqdm
 from leakpro.attacks.gia_attacks.invertinggradients import InvertingGradients, InvertingConfig
 from leakpro.fl_utils.data_utils import GiaTabularExtension
 from leakpro.fl_utils.gia_optimizers import MetaAdam, MetaSGD
 from leakpro.fl_utils.gia_train import train_nostep, train
-from leakpro.utils.seed import seed_everything
+from leakpro.utils.seed import seed_everything, restore_rng_state
 
 from fl.dataloader.tabular_dataloader import load_dataset
 from fl.fedsgd import run_fedsgd
 from fl.fedavg import run_fedavg
 
-from model import TabularMLP1
-from tabular_metrics import evaluate_batch_rows
+from tabular_metrics import evaluate_batch_rows, compute_reconstruction_metrics, write_round_summary
+
+from model.model import TabularMLP
 
 logger = logging.getLogger(__name__)
 if not logger.handlers:
@@ -86,12 +86,21 @@ def main(base_cfg_path: str, dataset_cfg_path: str, model_cfg_path: str, gia_cfg
         criterion = torch.nn.MSELoss()
 
 
-    # load model TabularMLP1
+    # load model TabularMLP
     out_dim = 1 if task == "binary" else feature_schema["num_classes"]
-    model = TabularMLP1(
+    preset_name = "large"
+    presets = model_cfg.get("presets", {}) or {}
+    if preset_name not in presets:
+        raise ValueError(f"Preset '{preset_name}' not found in model config.")
+    preset_cfg = presets[preset_name] or {}
+    model = TabularMLP(
         d_in=feature_schema["num_features"],
-        d_hidden=128,
-        num_classes=out_dim,
+        d_hidden=preset_cfg.get("d_hidden", 64),
+        d_out=out_dim,
+        num_layers=preset_cfg.get("num_layers", 2),
+        norm=preset_cfg.get("norm", "batchnorm"),
+        dropout=preset_cfg.get("dropout", 0.0),
+        activation=preset_cfg.get("activation", "relu"),
     )
 
     model.to(device)
@@ -109,12 +118,15 @@ def main(base_cfg_path: str, dataset_cfg_path: str, model_cfg_path: str, gia_cfg
         optimizer=optimizer_fn(optimizer, lr),
         criterion=criterion,
         data_extension=GiaTabularExtension(),
-        epochs=fl_cfg.get("local_epochs")
+        epochs=fl_cfg.get("local_epochs"),
     )
 
     # run fl training and inversion
+    def round_summary_fn(epoch_idx: int, round_idx: int, metrics_list: list[dict]) -> None:
+        write_round_summary(results_dir, epoch_idx, round_idx, metrics_list)
+
     if protocol == "fedsgd":
-        def attack_fn(att_model, batch_loader, epoch_idx, round_idx, client_idx, client_grads):
+        def attack_fn(att_model, batch_loader, epoch_idx, round_idx, client_idx, client_grads, rng_pre, rng_post):
             # fresh config per attack instance to avoid cross-attack state sharing
             attack_cfg = deepcopy(attack_cfg_base)
             attacker = InvertingGradients(
@@ -125,7 +137,9 @@ def main(base_cfg_path: str, dataset_cfg_path: str, model_cfg_path: str, gia_cfg
                 train_fn=train_nostep,
                 configs=attack_cfg,
             )
+            attacker.replay_rng_state = rng_pre
             attacker.prepare_attack()
+            restore_rng_state(rng_post)
 
             # assert that the gradient computed in run_fedsgd is the same as in the GIA pipeline
             if len(client_grads) != len(attacker.client_gradient):
@@ -159,15 +173,17 @@ def main(base_cfg_path: str, dataset_cfg_path: str, model_cfg_path: str, gia_cfg
             out_dir.mkdir(parents=True, exist_ok=True)
             results_path = out_dir / f"client_{client_idx}.txt"
             evaluate_batch_rows(attacker, feature_schema, str(results_path), client_idx)
+            metrics = compute_reconstruction_metrics(attacker, feature_schema, client_idx)
             tqdm.write(
                 f"GIA done: epoch={epoch_idx} round={round_idx} client={client_idx} "
                 f"best={float(attacker.best_loss):.6f}"
             )
+            return metrics
 
-        run_fedsgd(fl_cfg, model, criterion, attack_fn, client_dataloaders, val_loader, test_loader)
+        run_fedsgd(fl_cfg, model, criterion, attack_fn, client_dataloaders, val_loader, test_loader, round_summary_fn)
 
     elif protocol == "fedavg":
-        def attack_fn(att_model, batch_loader, epoch_idx, round_idx, client_idx, client_deltas):
+        def attack_fn(att_model, batch_loader, epoch_idx, round_idx, client_idx, client_deltas, rng_pre, rng_post):
             # fresh config per attack instance to avoid cross-attack state sharing
             attack_cfg = deepcopy(attack_cfg_base)
             attacker = InvertingGradients(
@@ -178,7 +194,9 @@ def main(base_cfg_path: str, dataset_cfg_path: str, model_cfg_path: str, gia_cfg
                 train_fn=train,
                 configs=attack_cfg,
             )
+            attacker.replay_rng_state = rng_pre
             attacker.prepare_attack()
+            restore_rng_state(rng_post)
 
             # assert that the deltas / model update computed in run_fedavg is the same as in the GIA pipeline
             if len(client_deltas) != len(attacker.client_gradient):
@@ -213,12 +231,14 @@ def main(base_cfg_path: str, dataset_cfg_path: str, model_cfg_path: str, gia_cfg
             out_dir.mkdir(parents=True, exist_ok=True)
             results_path = out_dir / f"client_{client_idx}.txt"
             evaluate_batch_rows(attacker, feature_schema, str(results_path), client_idx)
+            metrics = compute_reconstruction_metrics(attacker, feature_schema, client_idx)
             tqdm.write(
                 f"GIA done: epoch={epoch_idx} round={round_idx} client={client_idx} "
                 f"best={float(attacker.best_loss):.6f}"
             )
+            return metrics
 
-        run_fedavg(fl_cfg, model, criterion, optimizer_fn, attack_fn, client_dataloaders, val_loader, test_loader)
+        run_fedavg(fl_cfg, model, criterion, optimizer_fn, attack_fn, client_dataloaders, val_loader, test_loader, round_summary_fn)
 
 
 if __name__ == "__main__":
