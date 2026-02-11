@@ -49,10 +49,8 @@ def run_fedavg(cfg, global_model, criterion, optimizer_fn, attack_fn, client_dat
             while active_clients:
                 global_model.train()
                 round_idx += 1
-                if round_idx > bar.total:
-                    bar.total = round_idx
-                    bar.refresh()
-                bar.update(1)
+                if round_idx <= expected_rounds_per_full_dataset_pass:
+                    bar.update(1)
                 # 3. local client training and update collection
                 k = min(clients_per_round, len(active_clients))
                 active_list = list(active_clients)
@@ -124,6 +122,13 @@ def run_fedavg(cfg, global_model, criterion, optimizer_fn, attack_fn, client_dat
                     train_stats.get("r2", float("nan")),
                     "" if val_stats is None else f" val_loss={val_stats['loss']:.4f} val_mse={val_stats.get('mse', float('nan')):.4f} val_r2={val_stats.get('r2', float('nan')):.4f}",
                 )
+            )
+        if round_idx != expected_rounds_per_full_dataset_pass:
+            logging.info(
+                "Epoch %d rounds executed: %d (expected %d)",
+                i + 1,
+                round_idx,
+                expected_rounds_per_full_dataset_pass,
             )
 
     # 7. perform final evaluation on test dataloader
