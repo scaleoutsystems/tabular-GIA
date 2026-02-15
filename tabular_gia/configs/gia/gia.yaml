@@ -7,5 +7,5 @@ fedsgd:
 fedavg:
   invertingconfig:
     attack_lr: 0.03
-    at_iterations: 1000
+    at_iterations: 10000
     data_extension: GiaTabularExtension

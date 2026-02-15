@@ -1,0 +1,14 @@
+# example model.yaml designed in sweep.yaml
+
+#d_hidden: [64, 128, 256]
+#num_layers: [1, 2, 3]
+#norm: [none, batchnorm, layernorm]
+#dropout: [0.0, 0.15, 0.3]
+#activation: [relu, gelu, silu]
+
+use_preset: large
+
+presets:
+  small:  {d_hidden: 64,  num_layers: 2, norm: layernorm, dropout: 0.0, activation: gelu}
+  medium: {d_hidden: 128, num_layers: 3, norm: layernorm, dropout: 0.1, activation: gelu}
+  large:  {d_hidden: 256, num_layers: 4, norm: layernorm, dropout: 0.2, activation: gelu}

@@ -1,17 +1,32 @@
-base: configs/base.yaml
-dataset: configs/dataset/dataset.yaml
-model: configs/model/model.yaml
-gia: configs/gia/gia.yaml
-results: leakpro_output/tabular_gia_sweeps
+# base
+base:
+  protocol: [fedsgd, fedavg]
 
-fl_config_by_protocol:
-  fedsgd: configs/fl/fedsgd.yaml
-  fedavg: configs/fl/fedavg.yaml
+# dataset
+dataset:
+  dataset_path_and_meta_path: [[data/binary/adult/adult.csv, data/binary/adult/adult.yaml]]
+  batch_size: [1, 4, 16, 64, 256]
 
-grid:
-  base.protocol: [fedsgd]
-  model.name: [mlp1, mlp2]
-  model.d_hidden: [64, 128]
-  fl.full_dataset_passes: [1]
-  fl.client_participation: [0.2]
-  gia.fedsgd.invertingconfig.at_iterations: [10]
+# model
+model:
+  use_preset: true # NOTE: if set true, other model params will be ignored and it will default to presets in default model.yaml. Uncomment to disable to sweep all params.
+  name: [small, medium, large]
+  d_hidden: [64, 128, 256]
+  num_layers: [1, 2, 3]
+  norm: [none, batchnorm, layernorm]
+  dropout: [0.0, 0.15, 0.3]
+  activation: [relu, gelu, silu]
+
+# fl
+fl:
+  fedsgd:
+    full_dataset_passes: [1]
+    client_participation: [1.0, 0.5]
+  fedavg:
+    full_dataset_passes: [1]
+    local_steps: [1, 10, 100]
+    local_epochs: [1, 10, 100]
+    client_participation: [1.0, 0.5]
+
+# gia empty for now frozen configs
+gia: {}

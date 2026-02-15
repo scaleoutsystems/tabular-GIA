@@ -7,18 +7,10 @@ from sklearn.model_selection import train_test_split, StratifiedKFold, KFold
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 import logging
-from functools import partial
 
 logger = logging.getLogger(__name__)
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
-
-
-def _seed_worker(worker_id: int, seed: int) -> None:
-    worker_seed = seed + worker_id
-    np.random.seed(worker_seed)
-    random.seed(worker_seed)
-    torch.manual_seed(worker_seed)
 
 
 def _handle_missing_values(df: pd.DataFrame, missing_values) -> pd.DataFrame:
@@ -367,7 +359,11 @@ def load_dataset(dataset_path: str, dataset_meta_path: str, num_clients: int, **
     generator = torch.Generator()
     generator.manual_seed(seed)
 
-    worker_init_fn = partial(_seed_worker, seed=seed) if num_workers > 0 else None
+    def _seed_worker(worker_id: int) -> None:
+        worker_seed = seed + worker_id
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
+        torch.manual_seed(worker_seed)
 
     y_train_t = _encode_target(y_train, task, target_classes)
     y_val_t = _encode_target(y_val, task, target_classes)
@@ -411,7 +407,7 @@ def load_dataset(dataset_path: str, dataset_meta_path: str, num_clients: int, **
             num_workers=num_workers,
             pin_memory=pin_memory,
             persistent_workers=persistent_workers,
-            worker_init_fn=worker_init_fn,
+            worker_init_fn=_seed_worker if num_workers > 0 else None,
             generator=generator,
         )
         client_dataloaders.append(client_loader)
@@ -423,7 +419,7 @@ def load_dataset(dataset_path: str, dataset_meta_path: str, num_clients: int, **
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=persistent_workers,
-        worker_init_fn=worker_init_fn,
+        worker_init_fn=_seed_worker if num_workers > 0 else None,
         generator=generator,
     )
     test_loader = DataLoader(
@@ -433,7 +429,7 @@ def load_dataset(dataset_path: str, dataset_meta_path: str, num_clients: int, **
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=persistent_workers,
-        worker_init_fn=worker_init_fn,
+        worker_init_fn=_seed_worker if num_workers > 0 else None,
         generator=generator,
     )
 

@@ -1,5 +1,6 @@
 """Evaluation metrics for tabular gradient inversion attacks."""
 
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -44,6 +45,132 @@ def apply_matching(orig: Tensor, recon: Tensor, labels: Tensor | None) -> tuple[
     if labels is not None:
         labels = labels[perm]
     return orig, recon, labels
+
+
+def compute_reconstruction_metrics(
+    attacker: object,
+    feature_schema: Dict,
+    client_idx: int,
+) -> Dict:
+    """Compute aggregate reconstruction metrics for a single client batch."""
+    num_cols = feature_schema.get("num_cols", [])
+    cat_cols = feature_schema.get("cat_cols", [])
+    cat_categories = feature_schema.get("cat_categories", {}) or {}
+
+    if attacker.best_reconstruction:
+        recon_tensor = torch.cat([batch[0] for batch in attacker.best_reconstruction], dim=0).detach().cpu()
+    else:
+        recon_tensor = torch.zeros_like(attacker.original.detach().cpu())
+    orig_tensor = attacker.original.detach().cpu()
+
+    labels = attacker.reconstruction_labels
+    if labels is None:
+        label_tensor = None
+    elif isinstance(labels, list):
+        label_tensor = torch.stack(labels).view(-1).detach().cpu()
+    else:
+        label_tensor = torch.as_tensor(labels).view(-1).detach().cpu()
+
+    orig_tensor, recon_tensor, label_tensor = apply_matching(orig_tensor, recon_tensor, label_tensor)
+
+    num_count = len(num_cols)
+    num_std = None
+    if num_count > 0:
+        means = feature_schema.get("client_num_mean", [])
+        stds = feature_schema.get("client_num_std", [])
+        if client_idx < len(means) and client_idx < len(stds):
+            mean = torch.tensor(means[client_idx], dtype=orig_tensor.dtype)
+            std = torch.tensor(stds[client_idx], dtype=orig_tensor.dtype)
+            orig_tensor = orig_tensor.clone()
+            recon_tensor = recon_tensor.clone()
+            orig_tensor[:, :num_count] = (orig_tensor[:, :num_count] * std) + mean
+            recon_tensor[:, :num_count] = (recon_tensor[:, :num_count] * std) + mean
+            num_std = std.detach().cpu().numpy()
+
+    orig_np = orig_tensor.numpy()
+    recon_np = recon_tensor.numpy()
+
+    if num_count > 0:
+        gt_num = orig_np[:, :num_count]
+        recon_num = recon_np[:, :num_count]
+        if num_std is not None and num_std.size >= num_count:
+            eps = 0.319 * num_std[:num_count]
+        else:
+            eps = np.full(num_count, 0.319, dtype=np.float32)
+        num_hits = (np.abs(gt_num - recon_num) <= eps[None, :]).sum(axis=1).astype(float)
+        num_acc = num_hits / num_count
+    else:
+        num_acc = np.zeros(orig_tensor.shape[0], dtype=float)
+        num_hits = np.zeros(orig_tensor.shape[0], dtype=float)
+
+    cat_hits = np.zeros(orig_tensor.shape[0], dtype=float)
+    current_idx = num_count
+    for col in cat_cols:
+        cats = cat_categories.get(col, [])
+        if isinstance(cats, dict):
+            cats = cats.get("categories", [])
+        n_cats = len(cats)
+        if n_cats <= 0 or current_idx + n_cats > orig_tensor.shape[1]:
+            continue
+        idxs = list(range(current_idx, current_idx + n_cats))
+        cat_hits += (np.argmax(orig_np[:, idxs], axis=1) == np.argmax(recon_np[:, idxs], axis=1)).astype(float)
+        current_idx += n_cats
+
+    if len(cat_cols) > 0:
+        cat_acc = cat_hits / len(cat_cols)
+    else:
+        cat_acc = np.full(orig_tensor.shape[0], np.nan, dtype=float)
+
+    denom = num_count + len(cat_cols)
+    if denom > 0:
+        tableak_acc = (num_hits + cat_hits) / denom
+    else:
+        tableak_acc = np.full(orig_tensor.shape[0], np.nan, dtype=float)
+
+    return {
+        "num_acc": float(np.nanmean(num_acc)) if num_acc.size else float("nan"),
+        "cat_acc": float(np.nanmean(cat_acc)) if cat_acc.size else float("nan"),
+        "tableak_acc": float(np.nanmean(tableak_acc)) if tableak_acc.size else float("nan"),
+        "num_rows": int(orig_tensor.shape[0]),
+    }
+
+
+def write_round_summary(
+    results_dir: Path | str,
+    epoch_idx: int,
+    round_idx: int,
+    metrics_list: List[Dict],
+) -> None:
+    """Write aggregate reconstruction metrics for a round."""
+    if not metrics_list:
+        return
+    out_dir = Path(results_dir) / f"epoch_{epoch_idx}" / f"round_{round_idx}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"round_{round_idx}_summary.csv"
+
+    rows = np.array([m.get("num_rows", 0) for m in metrics_list], dtype=float)
+    total_rows = float(rows.sum()) if rows.size else 0.0
+    weights = rows / total_rows if total_rows > 0 else np.zeros_like(rows)
+
+    num_acc_vals = np.array([m.get("num_acc", np.nan) for m in metrics_list], dtype=float)
+    cat_acc_vals = np.array([m.get("cat_acc", np.nan) for m in metrics_list], dtype=float)
+    tableak_vals = np.array([m.get("tableak_acc", np.nan) for m in metrics_list], dtype=float)
+
+    def weighted_nanmean(values: np.ndarray, w: np.ndarray) -> float:
+        valid = ~np.isnan(values)
+        if not valid.any():
+            return float("nan")
+        return float(np.sum(values[valid] * w[valid]) / np.sum(w[valid]))
+
+    agg_num = weighted_nanmean(num_acc_vals, weights)
+    agg_cat = weighted_nanmean(cat_acc_vals, weights)
+    agg_tableak = weighted_nanmean(tableak_vals, weights)
+
+    header = "epoch,round,num_clients,total_rows,num_acc,cat_acc,tableak_acc\n"
+    line = f"{epoch_idx},{round_idx},{len(metrics_list)},{int(total_rows)},{agg_num},{agg_cat},{agg_tableak}\n"
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(header)
+        f.write(line)
 
 
 def compute_metrics(
@@ -425,13 +552,13 @@ def evaluate_batch_rows(
     cat_cols = feature_schema.get("cat_cols", [])
     cat_categories = feature_schema.get("cat_categories", {}) or {}
 
-    if getattr(attacker, "best_reconstruction", None):
+    if attacker.best_reconstruction:
         recon_tensor = torch.cat([batch[0] for batch in attacker.best_reconstruction], dim=0).detach().cpu()
     else:
         recon_tensor = torch.zeros_like(attacker.original.detach().cpu())
     orig_tensor = attacker.original.detach().cpu()
 
-    labels = getattr(attacker, "reconstruction_labels", None)
+    labels = attacker.reconstruction_labels
     if labels is None:
         label_tensor = None
     elif isinstance(labels, list):

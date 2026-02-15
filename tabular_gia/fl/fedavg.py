@@ -8,12 +8,8 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from leakpro.fl_utils.gia_train import train
 from leakpro.fl_utils.gia_optimizers import MetaAdam
-from tabular_gia.fl.metrics.fl_metrics import (
-    eval_epoch,
-    infer_task_from_criterion,
-    progress_write,
-    round_bar,
-)
+from leakpro.utils.seed import capture_rng_state
+from fl.metrics.fl_metrics import eval_epoch, infer_task_from_criterion, progress_write, round_bar
 
 
 logger = logging.getLogger(__name__)
@@ -21,7 +17,7 @@ if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
 
-def run_fedavg(cfg, global_model, criterion, optimizer_fn, attack_fn, client_dataloaders, val, test):
+def run_fedavg(cfg, global_model, criterion, optimizer_fn, attack_fn, client_dataloaders, val, test, round_summary_fn=None):
     # 1. parse fedavg cfg
     full_dataset_passes = cfg.get("full_dataset_passes")
     local_steps = cfg.get("local_steps", 1)
@@ -61,6 +57,7 @@ def run_fedavg(cfg, global_model, criterion, optimizer_fn, attack_fn, client_dat
                 random.shuffle(active_list)
 
                 client_updates = []
+                round_metrics = []
                 selected = 0
                 for client_idx in active_list:
                     if selected >= k:
@@ -81,16 +78,22 @@ def run_fedavg(cfg, global_model, criterion, optimizer_fn, attack_fn, client_dat
                     batch_loader = DataLoader(batch_ds, batch_size=batch_size, shuffle=False)
                     samples_seen = len(labels_cat) * local_epochs
 
+                    rng_pre = capture_rng_state()
                     deltas = train(global_model, batch_loader, optimizer_fn(optimizer, lr), criterion, epochs=local_epochs)
+                    rng_post = capture_rng_state()
                     client_updates.append((deltas, samples_seen))
                     selected += 1
 
                     # 4. gradient inversion attack using attack_fn
                     if attack_fn is not None:
-                        attack_fn(global_model, batch_loader, i + 1, round_idx, client_idx, deltas)
+                        metrics = attack_fn(global_model, batch_loader, i + 1, round_idx, client_idx, deltas, rng_pre, rng_post)
+                        if metrics is not None:
+                            round_metrics.append(metrics)
 
                 # 5. aggregate with fedavg_train
                 fedavg_train(global_model, client_updates)
+                if round_summary_fn is not None and round_metrics:
+                    round_summary_fn(i + 1, round_idx, round_metrics)
 
         # 6. epoch evaluation with validation loader
         task = infer_task_from_criterion(criterion)

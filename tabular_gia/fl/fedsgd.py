@@ -8,12 +8,8 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from leakpro.fl_utils.gia_train import train_nostep
 from leakpro.fl_utils.gia_optimizers import MetaSGD # currently unused but wired
-from tabular_gia.fl.metrics.fl_metrics import (
-    eval_epoch,
-    infer_task_from_criterion,
-    progress_write,
-    round_bar,
-)
+from leakpro.utils.seed import capture_rng_state
+from fl.metrics.fl_metrics import eval_epoch, infer_task_from_criterion, progress_write, round_bar
 
 
 logger = logging.getLogger(__name__)
@@ -21,7 +17,7 @@ if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
 
-def run_fedsgd(cfg, global_model, criterion, attack_fn, client_dataloaders, val, test):
+def run_fedsgd(cfg, global_model, criterion, attack_fn, client_dataloaders, val, test, round_summary_fn=None):
     # 1. parse cfg and take out essentials like effective epochs, num_clients, participation, lr
     epochs = cfg.get("full_dataset_passes")
     local_steps = cfg.get("local_steps", 1)
@@ -58,6 +54,7 @@ def run_fedsgd(cfg, global_model, criterion, attack_fn, client_dataloaders, val,
                 random.shuffle(active_list)
 
                 client_gradients = []
+                round_metrics = []
                 selected = 0
                 for client_idx in active_list:
                     if selected >= k:
@@ -75,16 +72,22 @@ def run_fedsgd(cfg, global_model, criterion, attack_fn, client_dataloaders, val,
                     batch_ds = TensorDataset(inputs, labels)
                     batch_loader = DataLoader(batch_ds, batch_size=len(batch_ds), shuffle=False)
 
+                    rng_pre = capture_rng_state()
                     grads = train_nostep(global_model, batch_loader, MetaSGD(lr), criterion, epochs=local_epochs)
+                    rng_post = capture_rng_state()
                     client_gradients.append([g.detach() if g is not None else None for g in grads])
                     selected += 1
 
                     # 4. gradient inversion attack using attack_fn
                     if attack_fn is not None:
-                        attack_fn(global_model, batch_loader, i + 1, round_idx, client_idx, grads)
+                        metrics = attack_fn(global_model, batch_loader, i + 1, round_idx, client_idx, grads, rng_pre, rng_post)
+                        if metrics is not None:
+                            round_metrics.append(metrics)
 
                 # 5. aggregate with fedsgd_train
                 fedsgd_train(global_model, client_gradients, lr)
+                if round_summary_fn is not None and round_metrics:
+                    round_summary_fn(i + 1, round_idx, round_metrics)
                 #adamw_state = fedsgd_train_adamw(global_model, client_gradients, adamw_state, lr)
 
         # 6. epoch evaluation with validation loader
