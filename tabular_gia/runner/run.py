@@ -90,20 +90,30 @@ def run(
     def _optimizer_fn(optimizer_name: str | None, lr: float):
         return MetaAdam(lr=lr) if optimizer_name == "MetaAdam" else MetaSGD(lr=lr)
 
+    invertingconfig = gia_cfg.get("invertingconfig")
+    if invertingconfig is None:
+        raise ValueError("Missing GIA invertingconfig.")
+    invertingconfig = dict(invertingconfig)
+    invertingconfig.pop("data_extension", None)
     attack_cfg_base = InvertingConfig(
-        attack_lr=gia_cfg.get("attack_lr"),
-        at_iterations=gia_cfg.get("at_iterations"),
         optimizer=_optimizer_fn(optimizer_name, lr),
         criterion=criterion,
         data_extension=GiaTabularExtension(),
         epochs=fl_cfg.get("local_epochs"),
+        **invertingconfig
     )
+    attack_schedule = str(gia_cfg.get("attack_schedule", "all")).strip().lower()
 
     def round_summary_fn(epoch_idx: int, round_idx: int, metrics_list: list[dict]) -> None:
         write_round_summary(results_dir, epoch_idx, round_idx, metrics_list)
 
     def _make_attack_fn(train_fn, mismatch_label: str):
         def attack_fn(att_model, batch_loader, epoch_idx, round_idx, client_idx, client_updates, rng_pre, rng_post):
+            if attack_schedule == "pow2":
+                r = int(round_idx)
+                if r < 1 or (r & (r - 1)) != 0:
+                    return None
+
             attack_cfg = deepcopy(attack_cfg_base)
             attacker = InvertingGradients(
                 att_model,
@@ -219,7 +229,7 @@ def run_sweep(
         write_yaml(base_cfg_run_path, spec["base_cfg"])
         write_yaml(dataset_cfg_run_path, spec["dataset_cfg"])
         write_yaml(model_cfg_run_path, spec["model_cfg"])
-        write_yaml(gia_cfg_run_path, {protocol: {"invertingconfig": spec["gia_cfg"]}})
+        write_yaml(gia_cfg_run_path, {protocol: spec["gia_cfg"]})
         write_yaml(fl_cfg_run_path, spec["fl_cfg"])
 
         run(
