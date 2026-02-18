@@ -17,7 +17,18 @@ if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
 
-def run_fedavg(cfg, global_model, criterion, optimizer_fn, attack_fn, client_dataloaders, val, test, round_summary_fn=None):
+def run_fedavg(
+    cfg,
+    global_model,
+    criterion,
+    optimizer_fn,
+    attack_fn,
+    client_dataloaders,
+    val,
+    test,
+    round_summary_fn=None,
+    epoch_summary_fn=None,
+):
     # 1. parse fedavg cfg
     full_dataset_passes = cfg.get("full_dataset_passes")
     local_steps = cfg.get("local_steps", 1)
@@ -28,13 +39,16 @@ def run_fedavg(cfg, global_model, criterion, optimizer_fn, attack_fn, client_dat
     lr = cfg.get("lr")
     optimizer = cfg.get("optimizer")
 
-    # 1.1 derive expected rounds per epoch from batch size, local_steps, participation, num_clients, and dataset size(s)
-    # batch_size * local_steps * num_clients * participation * rounds = len(data)
-    # rounds = len(data from combined client_dataloaders) / (batch_size*local_steps*num_clients*participation)
-    ds_size = sum(len(dl.dataset) for dl in client_dataloaders)
-    expected_rounds_per_full_dataset_pass = math.ceil(ds_size / (batch_size * local_steps * num_clients * client_participation))
-    logging.info("Expected rounds per full dataset pass: %d", expected_rounds_per_full_dataset_pass)
+    # 1.1 derive expected rounds per full dataset pass from effective (drop_last-aware) batch counts.
+    # total_client_batches = sum over clients of len(client_loader)
+    # each round consumes up to clients_per_round * local_steps batches
+    # expected_rounds = ceil(total_client_batches / (clients_per_round * local_steps))
     clients_per_round = max(1, math.ceil(client_participation * num_clients))
+    total_client_batches = sum(len(dl) for dl in client_dataloaders)
+    expected_rounds_per_full_dataset_pass = math.ceil(
+        total_client_batches / (clients_per_round * local_steps)
+    )
+    logging.info("Expected rounds per full dataset pass: %d", expected_rounds_per_full_dataset_pass)
     # NOTE: we divide full_dataset_passes by local_epochs to achieve true full dataset passes and compute
     full_dataset_passes = max(1, int(full_dataset_passes / local_epochs))
 
@@ -100,7 +114,7 @@ def run_fedavg(cfg, global_model, criterion, optimizer_fn, attack_fn, client_dat
         train_stats = eval_epoch(client_dataloaders, global_model, criterion, task)
         val_stats = eval_epoch([val], global_model, criterion, task) if val is not None else None
 
-        if task in ("binary", "multiclass"):
+        if task == "binary":
             progress_write(
                 "Epoch %d/%d - train_loss=%.4f train_acc=%.4f%s"
                 % (
@@ -111,16 +125,29 @@ def run_fedavg(cfg, global_model, criterion, optimizer_fn, attack_fn, client_dat
                     "" if val_stats is None else f" val_loss={val_stats['loss']:.4f} val_acc={val_stats.get('acc', float('nan')):.4f}",
                 )
             )
+        elif task == "multiclass":
+            progress_write(
+                "Epoch %d/%d - train_loss=%.4f train_acc=%.4f train_f1_macro=%.4f%s"
+                % (
+                    i + 1,
+                    full_dataset_passes,
+                    train_stats["loss"],
+                    train_stats.get("acc", float("nan")),
+                    train_stats.get("f1_macro", float("nan")),
+                    "" if val_stats is None else f" val_loss={val_stats['loss']:.4f} val_acc={val_stats.get('acc', float('nan')):.4f} val_f1_macro={val_stats.get('f1_macro', float('nan')):.4f}",
+                )
+            )
         else:
             progress_write(
-                "Epoch %d/%d - train_loss=%.4f train_mse=%.4f train_r2=%.4f%s"
+                "Epoch %d/%d - train_loss=%.4f train_mse=%.4f train_mae=%.4f train_r2=%.4f%s"
                 % (
                     i + 1,
                     full_dataset_passes,
                     train_stats["loss"],
                     train_stats.get("mse", float("nan")),
+                    train_stats.get("mae", float("nan")),
                     train_stats.get("r2", float("nan")),
-                    "" if val_stats is None else f" val_loss={val_stats['loss']:.4f} val_mse={val_stats.get('mse', float('nan')):.4f} val_r2={val_stats.get('r2', float('nan')):.4f}",
+                    "" if val_stats is None else f" val_loss={val_stats['loss']:.4f} val_mse={val_stats.get('mse', float('nan')):.4f} val_mae={val_stats.get('mae', float('nan')):.4f} val_r2={val_stats.get('r2', float('nan')):.4f}",
                 )
             )
         if round_idx != expected_rounds_per_full_dataset_pass:
@@ -130,20 +157,30 @@ def run_fedavg(cfg, global_model, criterion, optimizer_fn, attack_fn, client_dat
                 round_idx,
                 expected_rounds_per_full_dataset_pass,
             )
+        if epoch_summary_fn is not None:
+            epoch_summary_fn(i + 1)
 
     # 7. perform final evaluation on test dataloader
     test_stats = eval_epoch([test], global_model, criterion, task)
-    if task in ("binary", "multiclass"):
+    if task == "binary":
         logger.info(
             "Test - loss=%.4f acc=%.4f",
             test_stats["loss"],
             test_stats.get("acc", float("nan")),
         )
+    elif task == "multiclass":
+        logger.info(
+            "Test - loss=%.4f acc=%.4f f1_macro=%.4f",
+            test_stats["loss"],
+            test_stats.get("acc", float("nan")),
+            test_stats.get("f1_macro", float("nan")),
+        )
     else:
         logger.info(
-            "Test - loss=%.4f mse=%.4f r2=%.4f",
+            "Test - loss=%.4f mse=%.4f mae=%.4f r2=%.4f",
             test_stats["loss"],
             test_stats.get("mse", float("nan")),
+            test_stats.get("mae", float("nan")),
             test_stats.get("r2", float("nan")),
         )
     logging.info("FedAvg training completed.")

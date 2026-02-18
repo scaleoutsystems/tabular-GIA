@@ -17,7 +17,17 @@ if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
 
-def run_fedsgd(cfg, global_model, criterion, attack_fn, client_dataloaders, val, test, round_summary_fn=None):
+def run_fedsgd(
+    cfg,
+    global_model,
+    criterion,
+    attack_fn,
+    client_dataloaders,
+    val,
+    test,
+    round_summary_fn=None,
+    epoch_summary_fn=None,
+):
     # 1. parse cfg and take out essentials like effective epochs, num_clients, participation, lr
     epochs = cfg.get("full_dataset_passes")
     local_steps = cfg.get("local_steps", 1)
@@ -27,13 +37,14 @@ def run_fedsgd(cfg, global_model, criterion, attack_fn, client_dataloaders, val,
     client_participation = cfg.get("client_participation")
     lr = cfg.get("lr")
 
-    # 1.1 derive expected rounds per epoch from batch size, participation, num_clients, and dataset size(s)
-    # batch_size * num_clients * participation * rounds = len(data)
-    # rounds = len(data from combined client_dataloaders) / (batch_size*steps=1*num_clients*participation)
-    ds_size = sum(len(dl.dataset) for dl in client_dataloaders)
-    expected_rounds_per_epoch = math.ceil(ds_size / (batch_size * 1 * num_clients * client_participation))
-    logging.info("Expected rounds per epoch: %d", expected_rounds_per_epoch)
+    # 1.1 derive expected rounds per epoch from effective (drop_last-aware) batch counts.
+    # total_client_batches = sum over clients of len(client_loader)
+    # each round consumes up to clients_per_round batches in FedSGD
+    # expected_rounds = ceil(total_client_batches / clients_per_round)
     clients_per_round = max(1, math.ceil(client_participation * num_clients))
+    total_client_batches = sum(len(dl) for dl in client_dataloaders)
+    expected_rounds_per_epoch = math.ceil(total_client_batches / clients_per_round)
+    logging.info("Expected rounds per epoch: %d", expected_rounds_per_epoch)
 
     for i in range(epochs):
         # 2. initialize global model
@@ -95,7 +106,7 @@ def run_fedsgd(cfg, global_model, criterion, attack_fn, client_dataloaders, val,
         train_stats = eval_epoch(client_dataloaders, global_model, criterion, task)
         val_stats = eval_epoch([val], global_model, criterion, task) if val is not None else None
 
-        if task in ("binary", "multiclass"):
+        if task == "binary":
             progress_write(
                 "Epoch %d/%d - train_loss=%.4f train_acc=%.4f%s"
                 % (
@@ -106,34 +117,57 @@ def run_fedsgd(cfg, global_model, criterion, attack_fn, client_dataloaders, val,
                     "" if val_stats is None else f" val_loss={val_stats['loss']:.4f} val_acc={val_stats.get('acc', float('nan')):.4f}",
                 )
             )
+        elif task == "multiclass":
+            progress_write(
+                "Epoch %d/%d - train_loss=%.4f train_acc=%.4f train_f1_macro=%.4f%s"
+                % (
+                    i + 1,
+                    epochs,
+                    train_stats["loss"],
+                    train_stats.get("acc", float("nan")),
+                    train_stats.get("f1_macro", float("nan")),
+                    "" if val_stats is None else f" val_loss={val_stats['loss']:.4f} val_acc={val_stats.get('acc', float('nan')):.4f} val_f1_macro={val_stats.get('f1_macro', float('nan')):.4f}",
+                )
+            )
         else:
             progress_write(
-                "Epoch %d/%d - train_loss=%.4f train_mse=%.4f train_r2=%.4f%s"
+                "Epoch %d/%d - train_loss=%.4f train_mse=%.4f train_mae=%.4f train_r2=%.4f%s"
                 % (
                     i + 1,
                     epochs,
                     train_stats["loss"],
                     train_stats.get("mse", float("nan")),
+                    train_stats.get("mae", float("nan")),
                     train_stats.get("r2", float("nan")),
-                    "" if val_stats is None else f" val_loss={val_stats['loss']:.4f} val_mse={val_stats.get('mse', float('nan')):.4f} val_r2={val_stats.get('r2', float('nan')):.4f}",
+                    "" if val_stats is None else f" val_loss={val_stats['loss']:.4f} val_mse={val_stats.get('mse', float('nan')):.4f} val_mae={val_stats.get('mae', float('nan')):.4f} val_r2={val_stats.get('r2', float('nan')):.4f}",
                 )
             )
         if round_idx != expected_rounds_per_epoch:
             logging.info("Epoch %d rounds executed: %d (expected %d)", i + 1, round_idx, expected_rounds_per_epoch)
+        if epoch_summary_fn is not None:
+            epoch_summary_fn(i + 1)
 
     # 7. perform final evaluation on test dataloader
     test_stats = eval_epoch([test], global_model, criterion, task)
-    if task in ("binary", "multiclass"):
+    if task == "binary":
         logger.info(
             "Test - loss=%.4f acc=%.4f",
             test_stats["loss"],
             test_stats.get("acc", float("nan")),
         )
+    elif task == "multiclass":
+        logger.info(
+            "Test - loss=%.4f acc=%.4f f1_macro=%.4f",
+            test_stats["loss"],
+            test_stats.get("acc", float("nan")),
+            test_stats.get("f1_macro", float("nan")),
+        )
     else:
         logger.info(
-            "Test - loss=%.4f mse=%.4f r2=%.4f",
+            "Test - loss=%.4f mse=%.4f mae=%.4f r2=%.4f",
             test_stats["loss"],
             test_stats.get("mse", float("nan")),
+            test_stats.get("mae", float("nan")),
             test_stats.get("r2", float("nan")),
         )
     logging.info("FedSGD training completed.")

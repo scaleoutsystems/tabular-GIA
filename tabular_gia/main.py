@@ -53,8 +53,8 @@ def main(
         # run single
         logger.info("Loading gia config: base=%s", gia_cfg_path)
         gia_cfg_root = read_yaml(gia_cfg_path)
-        gia_cfg = gia_cfg_root.get(protocol, {}).get("invertingconfig")
-        if gia_cfg is None:
+        gia_cfg = gia_cfg_root.get(protocol)
+        if gia_cfg is None or gia_cfg.get("invertingconfig") is None:
             raise ValueError(f"Missing GIA config at '{protocol}.invertingconfig'.")
         results_dir = results_dir / "single_run" / protocol
         run(

@@ -1,11 +1,13 @@
 fedsgd:
+  attack_schedule: pow2
   invertingconfig:
     attack_lr: 0.03
     at_iterations: 1000
     data_extension: GiaTabularExtension
 
 fedavg:
+  attack_schedule: pow2
   invertingconfig:
     attack_lr: 0.03
-    at_iterations: 10000
+    at_iterations: 1000
     data_extension: GiaTabularExtension

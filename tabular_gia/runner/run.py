@@ -25,8 +25,13 @@ from leakpro.utils.seed import restore_rng_state
 from model.model import TabularMLP
 from metrics.tabular_metrics import (
     compute_reconstruction_metrics,
-    evaluate_batch_rows,
+    prepare_tensors_for_metrics,
+    summarize_epoch,
+    summarize_run,
+    write_debug_reconstruction_txt,
+    write_epoch_summary,
     write_round_summary,
+    write_run_summary,
 )
 
 logger = logging.getLogger(__name__)
@@ -90,20 +95,48 @@ def run(
     def _optimizer_fn(optimizer_name: str | None, lr: float):
         return MetaAdam(lr=lr) if optimizer_name == "MetaAdam" else MetaSGD(lr=lr)
 
+    invertingconfig = gia_cfg.get("invertingconfig")
+    if invertingconfig is None:
+        raise ValueError("Missing GIA invertingconfig.")
+    invertingconfig = dict(invertingconfig)
+    invertingconfig.pop("data_extension", None)
     attack_cfg_base = InvertingConfig(
-        attack_lr=gia_cfg.get("attack_lr"),
-        at_iterations=gia_cfg.get("at_iterations"),
         optimizer=_optimizer_fn(optimizer_name, lr),
         criterion=criterion,
         data_extension=GiaTabularExtension(),
         epochs=fl_cfg.get("local_epochs"),
+        **invertingconfig
     )
+    attack_schedule = str(gia_cfg.get("attack_schedule", "all")).strip().lower()
+    round_summaries_by_epoch: dict[int, list[dict]] = {}
+    epoch_summaries_by_epoch: dict[int, dict] = {}
 
     def round_summary_fn(epoch_idx: int, round_idx: int, metrics_list: list[dict]) -> None:
-        write_round_summary(results_dir, epoch_idx, round_idx, metrics_list)
+        round_summary = write_round_summary(results_dir, epoch_idx, round_idx, metrics_list)
+        if round_summary is not None:
+            round_summaries_by_epoch.setdefault(epoch_idx, []).append(round_summary)
+
+    def epoch_summary_fn(epoch_idx: int) -> None:
+        epoch_rounds = round_summaries_by_epoch.get(epoch_idx, [])
+        epoch_summary = summarize_epoch(epoch_idx, epoch_rounds)
+        if epoch_summary is None:
+            return
+        write_epoch_summary(results_dir, epoch_summary)
+        epoch_summaries_by_epoch[epoch_idx] = epoch_summary
+
+    def finalize_summaries() -> None:
+        epoch_summaries = [epoch_summaries_by_epoch[k] for k in sorted(epoch_summaries_by_epoch)]
+        run_summary = summarize_run(epoch_summaries)
+        if run_summary is not None:
+            write_run_summary(results_dir, run_summary)
 
     def _make_attack_fn(train_fn, mismatch_label: str):
         def attack_fn(att_model, batch_loader, epoch_idx, round_idx, client_idx, client_updates, rng_pre, rng_post):
+            if attack_schedule == "pow2":
+                r = int(round_idx)
+                if r < 1 or (r & (r - 1)) != 0:
+                    return None
+
             attack_cfg = deepcopy(attack_cfg_base)
             attacker = InvertingGradients(
                 att_model,
@@ -149,8 +182,24 @@ def run(
             out_dir = results_dir / f"epoch_{epoch_idx}" / f"round_{round_idx}"
             out_dir.mkdir(parents=True, exist_ok=True)
             results_path = out_dir / f"client_{client_idx}.txt"
-            evaluate_batch_rows(attacker, feature_schema, str(results_path), client_idx)
-            metrics = compute_reconstruction_metrics(attacker, feature_schema, client_idx)
+            orig_tensor, recon_tensor, label_tensor = prepare_tensors_for_metrics(attacker, feature_schema, client_idx)
+            reconstruction_metrics = compute_reconstruction_metrics(
+                orig_tensor,
+                recon_tensor,
+                feature_schema,
+                client_idx,
+            )
+            write_debug_reconstruction_txt(
+                str(results_path),
+                orig_tensor,
+                recon_tensor,
+                reconstruction_metrics["per_row_metrics"],
+                feature_schema,
+                client_idx,
+                label_tensor,
+            )
+            metrics = dict(reconstruction_metrics["aggregate_metrics"])
+            metrics["client_idx"] = int(client_idx)
             tqdm.write(
                 f"GIA done: epoch={epoch_idx} round={round_idx} client={client_idx} "
                 f"best={float(attacker.best_loss):.6f}"
@@ -161,7 +210,18 @@ def run(
 
     if protocol == "fedsgd":
         attack_fn = _make_attack_fn(train_nostep, "Gradient")
-        run_fedsgd(fl_cfg, model, criterion, attack_fn, client_dataloaders, val_loader, test_loader, round_summary_fn)
+        run_fedsgd(
+            fl_cfg,
+            model,
+            criterion,
+            attack_fn,
+            client_dataloaders,
+            val_loader,
+            test_loader,
+            round_summary_fn,
+            epoch_summary_fn,
+        )
+        finalize_summaries()
         return
 
     if protocol == "fedavg":
@@ -176,7 +236,9 @@ def run(
             val_loader,
             test_loader,
             round_summary_fn,
+            epoch_summary_fn,
         )
+        finalize_summaries()
         return
 
     raise ValueError(f"Unsupported protocol: {protocol}")
@@ -219,7 +281,7 @@ def run_sweep(
         write_yaml(base_cfg_run_path, spec["base_cfg"])
         write_yaml(dataset_cfg_run_path, spec["dataset_cfg"])
         write_yaml(model_cfg_run_path, spec["model_cfg"])
-        write_yaml(gia_cfg_run_path, {protocol: {"invertingconfig": spec["gia_cfg"]}})
+        write_yaml(gia_cfg_run_path, {protocol: spec["gia_cfg"]})
         write_yaml(fl_cfg_run_path, spec["fl_cfg"])
 
         run(
