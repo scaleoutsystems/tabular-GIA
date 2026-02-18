@@ -104,7 +104,12 @@ class AbstractGIA(AbstractAttack):
         def _loader_from_tensor(recon_tensor: Tensor) -> DataLoader:
             ds_cls = reconstruction_loader.dataset.__class__
             ds = ds_cls(recon_tensor, reconstruction_loader.dataset.labels)
-            return DataLoader(ds, batch_size=reconstruction_loader.batch_size or 32, shuffle=False)
+            return DataLoader(
+                ds,
+                batch_size=reconstruction_loader.batch_size or 32,
+                shuffle=False,
+                drop_last=reconstruction_loader.drop_last,
+            )
 
         optimizer = torch.optim.Adam([reconstruction], lr=attack_lr)
         # Initialize best reconstruction fallback

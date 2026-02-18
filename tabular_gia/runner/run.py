@@ -25,8 +25,13 @@ from leakpro.utils.seed import restore_rng_state
 from model.model import TabularMLP
 from metrics.tabular_metrics import (
     compute_reconstruction_metrics,
-    evaluate_batch_rows,
+    prepare_tensors_for_metrics,
+    summarize_epoch,
+    summarize_run,
+    write_debug_reconstruction_txt,
+    write_epoch_summary,
     write_round_summary,
+    write_run_summary,
 )
 
 logger = logging.getLogger(__name__)
@@ -103,9 +108,27 @@ def run(
         **invertingconfig
     )
     attack_schedule = str(gia_cfg.get("attack_schedule", "all")).strip().lower()
+    round_summaries_by_epoch: dict[int, list[dict]] = {}
+    epoch_summaries_by_epoch: dict[int, dict] = {}
 
     def round_summary_fn(epoch_idx: int, round_idx: int, metrics_list: list[dict]) -> None:
-        write_round_summary(results_dir, epoch_idx, round_idx, metrics_list)
+        round_summary = write_round_summary(results_dir, epoch_idx, round_idx, metrics_list)
+        if round_summary is not None:
+            round_summaries_by_epoch.setdefault(epoch_idx, []).append(round_summary)
+
+    def epoch_summary_fn(epoch_idx: int) -> None:
+        epoch_rounds = round_summaries_by_epoch.get(epoch_idx, [])
+        epoch_summary = summarize_epoch(epoch_idx, epoch_rounds)
+        if epoch_summary is None:
+            return
+        write_epoch_summary(results_dir, epoch_summary)
+        epoch_summaries_by_epoch[epoch_idx] = epoch_summary
+
+    def finalize_summaries() -> None:
+        epoch_summaries = [epoch_summaries_by_epoch[k] for k in sorted(epoch_summaries_by_epoch)]
+        run_summary = summarize_run(epoch_summaries)
+        if run_summary is not None:
+            write_run_summary(results_dir, run_summary)
 
     def _make_attack_fn(train_fn, mismatch_label: str):
         def attack_fn(att_model, batch_loader, epoch_idx, round_idx, client_idx, client_updates, rng_pre, rng_post):
@@ -159,8 +182,24 @@ def run(
             out_dir = results_dir / f"epoch_{epoch_idx}" / f"round_{round_idx}"
             out_dir.mkdir(parents=True, exist_ok=True)
             results_path = out_dir / f"client_{client_idx}.txt"
-            evaluate_batch_rows(attacker, feature_schema, str(results_path), client_idx)
-            metrics = compute_reconstruction_metrics(attacker, feature_schema, client_idx)
+            orig_tensor, recon_tensor, label_tensor = prepare_tensors_for_metrics(attacker, feature_schema, client_idx)
+            reconstruction_metrics = compute_reconstruction_metrics(
+                orig_tensor,
+                recon_tensor,
+                feature_schema,
+                client_idx,
+            )
+            write_debug_reconstruction_txt(
+                str(results_path),
+                orig_tensor,
+                recon_tensor,
+                reconstruction_metrics["per_row_metrics"],
+                feature_schema,
+                client_idx,
+                label_tensor,
+            )
+            metrics = dict(reconstruction_metrics["aggregate_metrics"])
+            metrics["client_idx"] = int(client_idx)
             tqdm.write(
                 f"GIA done: epoch={epoch_idx} round={round_idx} client={client_idx} "
                 f"best={float(attacker.best_loss):.6f}"
@@ -171,7 +210,18 @@ def run(
 
     if protocol == "fedsgd":
         attack_fn = _make_attack_fn(train_nostep, "Gradient")
-        run_fedsgd(fl_cfg, model, criterion, attack_fn, client_dataloaders, val_loader, test_loader, round_summary_fn)
+        run_fedsgd(
+            fl_cfg,
+            model,
+            criterion,
+            attack_fn,
+            client_dataloaders,
+            val_loader,
+            test_loader,
+            round_summary_fn,
+            epoch_summary_fn,
+        )
+        finalize_summaries()
         return
 
     if protocol == "fedavg":
@@ -186,7 +236,9 @@ def run(
             val_loader,
             test_loader,
             round_summary_fn,
+            epoch_summary_fn,
         )
+        finalize_summaries()
         return
 
     raise ValueError(f"Unsupported protocol: {protocol}")

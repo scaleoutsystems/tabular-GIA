@@ -126,16 +126,19 @@ def _normalize_numeric(
 
 
 def denormalize_numeric(
-    X: pd.DataFrame,
-    num_cols: list[str],
-    mean: pd.Series,
-    std: pd.Series,
-) -> pd.DataFrame:
-    if not num_cols:
+    X: torch.Tensor,
+    num_count: int,
+    mean: torch.Tensor | np.ndarray | list[float],
+    std: torch.Tensor | np.ndarray | list[float],
+) -> torch.Tensor:
+    """Denormalize the first num_count columns in a tabular tensor."""
+    if num_count <= 0:
         return X
-    X = X.copy()
-    X[num_cols] = (X[num_cols] * std) + mean
-    return X
+    out = X.clone()
+    mean_t = torch.as_tensor(mean, dtype=out.dtype, device=out.device)
+    std_t = torch.as_tensor(std, dtype=out.dtype, device=out.device)
+    out[:, :num_count] = (out[:, :num_count] * std_t[:num_count]) + mean_t[:num_count]
+    return out
 
 
 def _split_target(df: pd.DataFrame, target, no_header) -> tuple[pd.DataFrame, pd.Series]:
@@ -385,7 +388,7 @@ def load_dataset(dataset_path: str, dataset_meta_path: str, num_clients: int, **
     client_dataloaders = []
     client_num_means = []
     client_num_stds = []
-    for X_client, y_client in client_splits:
+    for client_idx, (X_client, y_client) in enumerate(client_splits):
         if num_cols:
             client_mean = X_client[num_cols].mean()
             client_std = X_client[num_cols].std().replace(0, 1e-6)
@@ -400,10 +403,17 @@ def load_dataset(dataset_path: str, dataset_meta_path: str, num_clients: int, **
             torch.tensor(X_client.to_numpy(dtype=np.float32, copy=False), dtype=torch.float32),
             y_client_t,
         )
+        if len(client_ds) < batch_size:
+            raise ValueError(
+                f"Client {client_idx} has {len(client_ds)} samples, smaller than batch_size={batch_size}. "
+                "With drop_last=True this client would produce zero batches. "
+                "Reduce batch_size, reduce num_clients, or increase client data."
+            )
         client_loader = DataLoader(
             client_ds,
             batch_size=batch_size,
             shuffle=True,
+            drop_last=True,
             num_workers=num_workers,
             pin_memory=pin_memory,
             persistent_workers=persistent_workers,

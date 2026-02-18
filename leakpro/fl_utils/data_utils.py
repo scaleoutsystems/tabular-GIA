@@ -217,10 +217,11 @@ class GiaTabularExtension(GiaDataModalityExtension):
 
         original = torch.cat(originals, dim=0)
         reconstruction = torch.randn_like(original)
+        drop_last = bool(client_loader.drop_last)
         org_dataset = CustomTensorDataset(original, labels)
-        org_loader = DataLoader(org_dataset, batch_size=batch_size, shuffle=False)
+        org_loader = DataLoader(org_dataset, batch_size=batch_size, shuffle=False, drop_last=drop_last)
         reconstruction_dataset = CustomTensorDataset(reconstruction, labels)
-        reconstruction_loader = DataLoader(reconstruction_dataset, batch_size=batch_size, shuffle=False)
+        reconstruction_loader = DataLoader(reconstruction_dataset, batch_size=batch_size, shuffle=False, drop_last=drop_last)
 
         return org_loader, original, reconstruction, labels, reconstruction_loader
 
@@ -347,11 +348,12 @@ class GiaTabularExtension2(GiaDataModalityExtension):
         else:
             reconstruction = torch.randn_like(original)
 
+        drop_last = bool(client_loader.drop_last)
         org_dataset = CustomTensorDataset(original, labels)
-        org_loader = DataLoader(org_dataset, batch_size=batch_size, shuffle=True)
+        org_loader = DataLoader(org_dataset, batch_size=batch_size, shuffle=True, drop_last=drop_last)
 
         reconstruction_dataset = CustomTensorDataset(reconstruction, labels)
-        reconstruction_loader = DataLoader(reconstruction_dataset, batch_size=batch_size, shuffle=True)
+        reconstruction_loader = DataLoader(reconstruction_dataset, batch_size=batch_size, shuffle=True, drop_last=drop_last)
 
         return org_loader, original, reconstruction, labels, reconstruction_loader
 
