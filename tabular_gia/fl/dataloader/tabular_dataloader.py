@@ -388,6 +388,7 @@ def load_dataset(dataset_path: str, dataset_meta_path: str, num_clients: int, **
     client_dataloaders = []
     client_num_means = []
     client_num_stds = []
+    client_cat_probs: list[dict[str, list[float]]] = []
     for client_idx, (X_client, y_client) in enumerate(client_splits):
         if num_cols:
             client_mean = X_client[num_cols].mean()
@@ -398,6 +399,27 @@ def load_dataset(dataset_path: str, dataset_meta_path: str, num_clients: int, **
         else:
             client_num_means.append(np.array([], dtype=np.float32))
             client_num_stds.append(np.array([], dtype=np.float32))
+
+        # Client-side categorical marginals are useful for prior baseline metrics.
+        cat_probs_for_client: dict[str, list[float]] = {}
+        current_idx = len(num_cols)
+        for col in cat_cols:
+            cats = encoder_meta["cat_categories"].get(col, [])
+            if isinstance(cats, dict):
+                cats = cats.get("categories", [])
+            n_cats = len(cats)
+            if n_cats <= 0 or current_idx + n_cats > X_client.shape[1]:
+                continue
+            probs = X_client.iloc[:, current_idx : current_idx + n_cats].mean(axis=0).to_numpy(dtype=np.float32)
+            total = float(np.sum(probs))
+            if total > 0:
+                probs = probs / total
+            else:
+                probs = np.full(n_cats, 1.0 / n_cats, dtype=np.float32)
+            cat_probs_for_client[col] = probs.tolist()
+            current_idx += n_cats
+        client_cat_probs.append(cat_probs_for_client)
+
         y_client_t = _encode_target(y_client, task, target_classes)
         client_ds = TensorDataset(
             torch.tensor(X_client.to_numpy(dtype=np.float32, copy=False), dtype=torch.float32),
@@ -455,6 +477,7 @@ def load_dataset(dataset_path: str, dataset_meta_path: str, num_clients: int, **
         "num_classes": len(target_classes) if task in ("binary", "multiclass") else 1,
         "client_num_mean": [m.tolist() for m in client_num_means],
         "client_num_std": [s.tolist() for s in client_num_stds],
+        "client_cat_probs": client_cat_probs,
     }
     logger.info("Feature schema: %s", feature_schema)
 
