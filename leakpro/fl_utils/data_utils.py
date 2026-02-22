@@ -201,6 +201,7 @@ class GiaTabularExtension(GiaDataModalityExtension):
         Assumes client_loader yields (features, labels) where features are numeric tensors.
         """
         batch_size = client_loader.batch_size or 32
+        label_known = bool(getattr(self, "label_known", True))
         originals = []
         labels: list = []
         for batch in client_loader:
@@ -211,9 +212,16 @@ class GiaTabularExtension(GiaDataModalityExtension):
             originals.append(feats.clone())
 
             if isinstance(lbls, Tensor):
-                labels.extend(deepcopy(lbls))
+                lbl_tensor = lbls if label_known else torch.zeros_like(lbls)
+                labels.extend(deepcopy(lbl_tensor))
             else:
-                labels.extend(deepcopy(lbls))
+                if label_known:
+                    labels.extend(deepcopy(lbls))
+                else:
+                    try:
+                        labels.extend([0] * len(lbls))
+                    except TypeError:
+                        labels.append(0)
 
         original = torch.cat(originals, dim=0)
         reconstruction = torch.randn_like(original)
