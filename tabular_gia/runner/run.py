@@ -1,6 +1,7 @@
 import json
 import logging
 import sys
+import csv
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -21,7 +22,7 @@ from leakpro.attacks.gia_attacks.invertinggradients import InvertingConfig, Inve
 from leakpro.fl_utils.data_utils import GiaTabularExtension
 from leakpro.fl_utils.gia_optimizers import MetaAdam, MetaSGD
 from leakpro.fl_utils.gia_train import train, train_nostep
-from leakpro.utils.seed import restore_rng_state
+from leakpro.utils.seed import restore_rng_state, seed_everything
 from model.model import TabularMLP
 from metrics.tabular_metrics import (
     compute_reconstruction_metrics,
@@ -124,11 +125,12 @@ def run(
         write_epoch_summary(results_dir, epoch_summary)
         epoch_summaries_by_epoch[epoch_idx] = epoch_summary
 
-    def finalize_summaries() -> None:
+    def finalize_summaries() -> dict | None:
         epoch_summaries = [epoch_summaries_by_epoch[k] for k in sorted(epoch_summaries_by_epoch)]
         run_summary = summarize_run(epoch_summaries)
         if run_summary is not None:
             write_run_summary(results_dir, run_summary)
+        return run_summary
 
     def _make_attack_fn(train_fn, mismatch_label: str):
         def attack_fn(att_model, batch_loader, epoch_idx, round_idx, client_idx, client_updates, rng_pre, rng_post):
@@ -221,8 +223,7 @@ def run(
             round_summary_fn,
             epoch_summary_fn,
         )
-        finalize_summaries()
-        return
+        return finalize_summaries()
 
     if protocol == "fedavg":
         attack_fn = _make_attack_fn(train, "Delta")
@@ -238,10 +239,56 @@ def run(
             round_summary_fn,
             epoch_summary_fn,
         )
-        finalize_summaries()
-        return
+        return finalize_summaries()
 
     raise ValueError(f"Unsupported protocol: {protocol}")
+
+
+def _extract_run_metadata(spec: dict, run_dir: Path) -> dict:
+    base_cfg = spec.get("base_cfg", {})
+    dataset_cfg = spec.get("dataset_cfg", {})
+    fl_cfg = spec.get("fl_cfg", {})
+    gia_cfg = spec.get("gia_cfg", {})
+    inverting_cfg = gia_cfg.get("invertingconfig", {}) or {}
+    model_override = (spec.get("overrides", {}) or {}).get("model", {}) or {}
+
+    return {
+        "run_dir": str(run_dir),
+        "protocol": base_cfg.get("protocol"),
+        "seed": base_cfg.get("seed"),
+        "attack_schedule": gia_cfg.get("attack_schedule", base_cfg.get("attack_schedule")),
+        "dataset_path": dataset_cfg.get("dataset_path"),
+        "dataset_meta_path": dataset_cfg.get("dataset_meta_path"),
+        "batch_size": dataset_cfg.get("batch_size"),
+        "partition_strategy": dataset_cfg.get("partition_strategy", "iid"),
+        "dirichlet_alpha": dataset_cfg.get("dirichlet_alpha"),
+        "num_clients": fl_cfg.get("num_clients"),
+        "client_participation": fl_cfg.get("client_participation"),
+        "full_dataset_passes": fl_cfg.get("full_dataset_passes"),
+        "local_steps": fl_cfg.get("local_steps"),
+        "local_epochs": fl_cfg.get("local_epochs"),
+        "optimizer": fl_cfg.get("optimizer"),
+        "lr": fl_cfg.get("lr"),
+        "label_known": inverting_cfg.get("label_known"),
+        "at_iterations": inverting_cfg.get("at_iterations"),
+        "attack_lr": inverting_cfg.get("attack_lr"),
+        "model_name": model_override.get("name"),
+    }
+
+
+def _write_sweep_results_csv(out_path: Path, rows: list[dict]) -> None:
+    if not rows:
+        return
+    fieldnames: list[str] = []
+    for row in rows:
+        for key in row.keys():
+            if key not in fieldnames:
+                fieldnames.append(key)
+    with open(out_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
 
 
 def run_sweep(
@@ -264,11 +311,19 @@ def run_sweep(
     experiment_dir.mkdir(parents=True, exist_ok=True)
 
     run_records = []
+    sweep_result_rows: list[dict] = []
     for spec in run_specs:
         run_id = int(spec["run_id"])
         protocol = str(spec["base_cfg"].get("protocol", ""))
+        run_seed = int(spec["base_cfg"].get("seed", 42))
         if not protocol:
             raise ValueError(f"Missing protocol for run_id={run_id}")
+
+        # Re-seed each run for reproducible multi-seed sweeps.
+        seed_everything(run_seed)
+
+        dataset_cfg_run = deepcopy(spec["dataset_cfg"])
+        dataset_cfg_run["seed"] = run_seed
 
         run_dir = experiment_dir / f"run_{run_id:04d}"
         cfg_dir = run_dir / "configs"
@@ -279,24 +334,35 @@ def run_sweep(
         fl_cfg_run_path = cfg_dir / "fl" / f"{protocol}.yaml"
 
         write_yaml(base_cfg_run_path, spec["base_cfg"])
-        write_yaml(dataset_cfg_run_path, spec["dataset_cfg"])
+        write_yaml(dataset_cfg_run_path, dataset_cfg_run)
         write_yaml(model_cfg_run_path, spec["model_cfg"])
         write_yaml(gia_cfg_run_path, {protocol: spec["gia_cfg"]})
         write_yaml(fl_cfg_run_path, spec["fl_cfg"])
 
-        run(
+        run_summary = run(
             protocol=protocol,
-            dataset_cfg=deepcopy(spec["dataset_cfg"]),
+            dataset_cfg=dataset_cfg_run,
             model_cfg=deepcopy(spec["model_cfg"]),
             fl_cfg=deepcopy(spec["fl_cfg"]),
             gia_cfg=deepcopy(spec["gia_cfg"]),
             results_dir=run_dir / "artifacts",
         )
 
+        metadata = _extract_run_metadata(spec, run_dir)
+        row = {
+            "run_id": run_id,
+            **metadata,
+            "overrides_json": json.dumps(spec.get("overrides", {}), sort_keys=True),
+        }
+        if run_summary is not None:
+            row.update(run_summary)
+        sweep_result_rows.append(row)
+
         run_records.append(
             {
                 "run_id": run_id,
                 "protocol": protocol,
+                "seed": run_seed,
                 "run_dir": str(run_dir),
                 "overrides": spec.get("overrides", {}),
             }
@@ -304,3 +370,4 @@ def run_sweep(
 
     with open(experiment_dir / "sweep_runs.json", "w", encoding="utf-8") as f:
         json.dump(run_records, f, indent=2)
+    _write_sweep_results_csv(experiment_dir / "sweep_results.csv", sweep_result_rows)

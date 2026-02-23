@@ -117,6 +117,9 @@ def compute_reconstruction_metrics(
         "nn_dist": nn_dist,
     }
 
+    prior_metrics = _prior_baseline_metrics(orig_tensor, feature_schema, client_idx, num_std)
+    distribution_metrics = _distribution_confidence_metrics(recon_tensor, feature_schema, client_idx)
+
     aggregate_metrics = {
         "num_acc": float(np.nanmean(num_acc)),
         "cat_acc": float(np.nanmean(cat_acc)),
@@ -129,7 +132,14 @@ def compute_reconstruction_metrics(
         "nn_median": float(np.median(nn_dist)),
         "nn_min": float(np.min(nn_dist)),
         "num_rows": int(orig_tensor.shape[0]),
+        **prior_metrics,
+        **distribution_metrics,
     }
+    aggregate_metrics["gain_num_over_prior"] = aggregate_metrics["num_acc"] - aggregate_metrics["prior_num_acc"]
+    aggregate_metrics["gain_cat_over_prior"] = aggregate_metrics["cat_acc"] - aggregate_metrics["prior_cat_acc"]
+    aggregate_metrics["gain_tableak_over_prior"] = (
+        aggregate_metrics["tableak_acc"] - aggregate_metrics["prior_tableak_acc"]
+    )
 
     return {
         "per_row_metrics": per_row_metrics,
@@ -141,6 +151,130 @@ def _emr(tableak_acc: np.ndarray, min_tableak_acc: float = 1.0) -> float:
     if min_tableak_acc >= 1.0:
         return float(np.mean(np.isclose(tableak_acc, 1.0)))
     return float(np.mean(tableak_acc >= min_tableak_acc))
+
+
+def _iter_cat_groups(feature_schema: Dict, total_dim: int, num_count: int) -> list[dict]:
+    cat_cols = feature_schema.get("cat_cols", [])
+    cat_categories = feature_schema.get("cat_categories", {}) or {}
+    groups: list[dict] = []
+    current_idx = num_count
+    for col in cat_cols:
+        cats = cat_categories.get(col, [])
+        if isinstance(cats, dict):
+            cats = cats.get("categories", [])
+        n_cats = len(cats)
+        if n_cats <= 0 or current_idx + n_cats > total_dim:
+            continue
+        groups.append({"name": col, "indices": list(range(current_idx, current_idx + n_cats)), "cats": cats})
+        current_idx += n_cats
+    return groups
+
+
+def _prior_baseline_metrics(
+    orig_tensor: Tensor,
+    feature_schema: Dict,
+    client_idx: int,
+    num_std: np.ndarray | None,
+) -> Dict[str, float]:
+    """Compute prior-only baseline reconstruction scores and attack gains."""
+    num_cols = feature_schema.get("num_cols", [])
+    cat_cols = feature_schema.get("cat_cols", [])
+    num_count = len(num_cols)
+    prior_tensor = torch.zeros_like(orig_tensor)
+
+    # Numeric prior: client mean for each numerical feature.
+    if num_count > 0:
+        means = feature_schema.get("client_num_mean", [])
+        if client_idx < len(means):
+            mean_arr = np.asarray(means[client_idx], dtype=np.float32)[:num_count]
+            prior_tensor[:, :num_count] = torch.as_tensor(mean_arr, dtype=orig_tensor.dtype, device=orig_tensor.device)
+
+    # Categorical prior: client marginal mode for each categorical feature.
+    client_cat_probs = feature_schema.get("client_cat_probs", [])
+    probs_map = client_cat_probs[client_idx] if client_idx < len(client_cat_probs) else {}
+    cat_groups = _iter_cat_groups(feature_schema, orig_tensor.shape[1], num_count)
+    for group in cat_groups:
+        idxs = group["indices"]
+        probs = np.asarray(probs_map.get(group["name"], []), dtype=np.float32)
+        if probs.size != len(idxs) or float(np.sum(probs)) <= 0:
+            probs = np.full(len(idxs), 1.0 / len(idxs), dtype=np.float32)
+        best = int(np.argmax(probs))
+        prior_tensor[:, idxs] = 0.0
+        prior_tensor[:, idxs[best]] = 1.0
+
+    prior_num_acc, prior_cat_acc, prior_tableak = _tab_leak_accuracy(
+        orig_tensor,
+        prior_tensor,
+        num_cols,
+        cat_cols,
+        feature_schema.get("cat_categories", {}) or {},
+        num_std,
+    )
+    return {
+        "prior_num_acc": float(np.nanmean(prior_num_acc)),
+        "prior_cat_acc": float(np.nanmean(prior_cat_acc)),
+        "prior_tableak_acc": float(np.nanmean(prior_tableak)),
+    }
+
+
+def _distribution_confidence_metrics(
+    recon_tensor: Tensor,
+    feature_schema: Dict,
+    client_idx: int,
+) -> Dict[str, float]:
+    """Estimate how likely the reconstructed batch is under client feature marginals."""
+    num_cols = feature_schema.get("num_cols", [])
+    num_count = len(num_cols)
+    cat_groups = _iter_cat_groups(feature_schema, recon_tensor.shape[1], num_count)
+    recon_np = recon_tensor.detach().cpu().numpy()
+
+    num_within_1std = float("nan")
+    num_within_2std = float("nan")
+    num_conf = float("nan")
+    if num_count > 0:
+        means = feature_schema.get("client_num_mean", [])
+        stds = feature_schema.get("client_num_std", [])
+        if client_idx < len(means) and client_idx < len(stds):
+            mean = np.asarray(means[client_idx], dtype=np.float32)[:num_count]
+            std = np.asarray(stds[client_idx], dtype=np.float32)[:num_count]
+            std = np.where(std <= 1e-8, 1e-8, std)
+            z = np.abs((recon_np[:, :num_count] - mean[None, :]) / std[None, :])
+            num_within_1std = float(np.mean(z <= 1.0))
+            num_within_2std = float(np.mean(z <= 2.0))
+            # Gaussian-kernel confidence in [0, 1]
+            num_conf = float(np.mean(np.exp(-0.5 * (z ** 2))))
+
+    cat_conf = float("nan")
+    if cat_groups:
+        client_cat_probs = feature_schema.get("client_cat_probs", [])
+        probs_map = client_cat_probs[client_idx] if client_idx < len(client_cat_probs) else {}
+        probs_list: list[np.ndarray] = []
+        for group in cat_groups:
+            idxs = group["indices"]
+            probs = np.asarray(probs_map.get(group["name"], []), dtype=np.float32)
+            if probs.size != len(idxs) or float(np.sum(probs)) <= 0:
+                probs = np.full(len(idxs), 1.0 / len(idxs), dtype=np.float32)
+            else:
+                probs = probs / float(np.sum(probs))
+            pred = np.argmax(recon_np[:, idxs], axis=1)
+            probs_list.append(probs[pred])
+        if probs_list:
+            cat_conf = float(np.mean(np.concatenate([p.reshape(-1) for p in probs_list])))
+
+    combined = []
+    if not np.isnan(num_conf):
+        combined.append(num_conf)
+    if not np.isnan(cat_conf):
+        combined.append(cat_conf)
+    dist_conf = float(np.mean(combined)) if combined else float("nan")
+
+    return {
+        "dist_conf": dist_conf,
+        "num_dist_conf": num_conf,
+        "cat_dist_conf": cat_conf,
+        "num_within_1std": num_within_1std,
+        "num_within_2std": num_within_2std,
+    }
 
 
 def _weighted_metric_means(

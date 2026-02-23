@@ -43,6 +43,9 @@ class InvertingConfig:
     data_extension: object = field(default_factory=lambda: GiaImageExtension())
     # Number of epochs for the client attack
     epochs: int = 1
+    # If True, attack optimization uses true labels from attacked batch.
+    # If False, labels are replaced with dummy labels (label-unknown setting).
+    label_known: bool = True
     # if to use median pool 2d on images, can improve attack on high higher resolution (100+)
     median_pooling: bool = False
     # if we compare difference only for top 10 layers with largest changes. Potentially good for larger models.
@@ -108,6 +111,8 @@ class InvertingGradients(AbstractGIA):
 
         """
         self.model.train()
+        if hasattr(self.configs, "label_known"):
+            setattr(self.configs.data_extension, "label_known", bool(self.configs.label_known))
         (
             self.client_loader,
             self.original,
