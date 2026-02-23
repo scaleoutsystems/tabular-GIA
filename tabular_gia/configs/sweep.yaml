@@ -1,11 +1,20 @@
 # base
 base:
   protocol: [fedsgd, fedavg]
+  seed: [42] # add more seeds (e.g. [42, 1337, 2026]) for multi-seed repeats
+  attack_schedule: [pow2] # options: pow2 | all (pow2 is cheaper)
 
 # dataset
 dataset:
   dataset_path_and_meta_path: [[data/binary/adult/adult.csv, data/binary/adult/adult.yaml]]
   batch_size: [1, 4, 16, 64, 256]
+  # Example expanded: partition_strategy: [iid, dirichlet]
+  partition_strategy: [iid] # options: iid | dirichlet
+  # Dirichlet non-IID concentration (smaller alpha => more heterogeneous clients).
+  # Example fixed:    dirichlet_alpha: [0.3]
+  # Example expanded: dirichlet_alpha: [0.1, 0.3, 1.0]
+  # Note: if partition_strategy includes iid, alpha is ignored for iid but still expands Cartesian runs.
+  dirichlet_alpha: [0.3]
 
 # model
 model:
@@ -20,13 +29,22 @@ model:
 # fl
 fl:
   fedsgd:
+    # Client/data-scale axis (one value fixed, multiple values expand runs).
+    # Example: [3, 10, 30]
+    num_clients: [10]
     full_dataset_passes: [1]
     client_participation: [1.0, 0.5]
   fedavg:
+    # Keep this list short unless you also tune batch_size, otherwise tiny client shards can fail with drop_last=True.
+    num_clients: [3]
     full_dataset_passes: [1]
     local_steps: [1, 10, 100]
     local_epochs: [1, 10, 100]
     client_participation: [1.0, 0.5]
 
-# gia empty for now frozen configs
-gia: {}
+# gia sweeps over invertingconfig overrides
+gia:
+  # Example expansion: at_iterations: [500, 1000], attack_lr: [0.01, 0.03]
+  at_iterations: [1000]
+  attack_lr: [0.03]
+  label_known: [true, false]

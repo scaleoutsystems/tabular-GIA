@@ -8,12 +8,17 @@ dataset_meta_path: data/binary/adult/adult.yaml
 #dataset_meta_path: data/regression/california_housing/california_housing.yaml
 
 # dataloader gpu speedups
-num_workers: 8
+num_workers: 0
 pin_memory: true
-persistent_workers: true
+persistent_workers: false
 
 # dataloader specifics
 batch_size: 64
 train_frac: 0.70
 val_frac: 0.15
 test_frac: 0.15
+
+# client partitioning
+partition_strategy: iid # iid | dirichlet
+dirichlet_alpha: 0.3
+min_client_samples: 1

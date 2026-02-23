@@ -204,6 +204,79 @@ def _encode_target(y: pd.Series, task: str, target_classes: list | None) -> torc
     return torch.tensor(y_num.to_numpy(), dtype=torch.float32).view(-1, 1)
 
 
+def _split_clients_iid(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    num_clients: int,
+    task: str,
+    seed: int,
+) -> list[tuple[pd.DataFrame, pd.Series]]:
+    if num_clients == 1:
+        return [(X_train, y_train)]
+
+    if task in ("binary", "multiclass"):
+        splitter = StratifiedKFold(n_splits=num_clients, shuffle=True, random_state=seed)
+        split_iter = splitter.split(X_train, y_train)
+    else:
+        splitter = KFold(n_splits=num_clients, shuffle=True, random_state=seed)
+        split_iter = splitter.split(X_train)
+
+    client_splits: list[tuple[pd.DataFrame, pd.Series]] = []
+    for _, client_idx in split_iter:
+        X_client = X_train.iloc[client_idx].reset_index(drop=True)
+        y_client = y_train.iloc[client_idx].reset_index(drop=True)
+        client_splits.append((X_client, y_client))
+    return client_splits
+
+
+def _split_clients_dirichlet(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    num_clients: int,
+    seed: int,
+    alpha: float,
+    min_client_samples: int = 1,
+    max_attempts: int = 50,
+) -> list[tuple[pd.DataFrame, pd.Series]]:
+    if num_clients == 1:
+        return [(X_train, y_train)]
+    if alpha <= 0:
+        raise ValueError(f"dirichlet_alpha must be > 0, got {alpha}")
+
+    rng = np.random.default_rng(seed)
+    y_codes = pd.Categorical(y_train, ordered=False).codes
+    num_classes = int(np.max(y_codes)) + 1 if len(y_codes) > 0 else 0
+
+    for _ in range(max_attempts):
+        idx_per_client: list[list[int]] = [[] for _ in range(num_clients)]
+        for class_id in range(num_classes):
+            class_indices = np.where(y_codes == class_id)[0]
+            rng.shuffle(class_indices)
+            probs = rng.dirichlet(np.full(num_clients, alpha, dtype=np.float64))
+            counts = rng.multinomial(len(class_indices), probs)
+            start = 0
+            for client_id, count in enumerate(counts):
+                if count > 0:
+                    idx_per_client[client_id].extend(class_indices[start : start + count].tolist())
+                start += count
+
+        sizes = [len(v) for v in idx_per_client]
+        if sizes and min(sizes) >= min_client_samples:
+            client_splits: list[tuple[pd.DataFrame, pd.Series]] = []
+            for idxs in idx_per_client:
+                rng.shuffle(idxs)
+                X_client = X_train.iloc[idxs].reset_index(drop=True)
+                y_client = y_train.iloc[idxs].reset_index(drop=True)
+                client_splits.append((X_client, y_client))
+            return client_splits
+
+    raise RuntimeError(
+        f"Failed to build Dirichlet client splits with alpha={alpha}, "
+        f"num_clients={num_clients}, min_client_samples={min_client_samples} "
+        f"after {max_attempts} attempts."
+    )
+
+
 def load_dataset(dataset_path: str, dataset_meta_path: str, num_clients: int, **kwargs):
     """Load and return dataloaders for a dataset. Kwargs are optional parameters to set dataloader speedups:
         num_workers,
@@ -336,23 +409,37 @@ def load_dataset(dataset_path: str, dataset_meta_path: str, num_clients: int, **
     X_train = X_train.reset_index(drop=True)
     y_train = y_train.reset_index(drop=True)
 
-    # 4.3 split train amongst num_clients, stratify on target
-    if num_clients == 1:
-        client_splits = [(X_train, y_train)]
-    else:
-        if task in ("binary", "multiclass"):
-            splitter = StratifiedKFold(n_splits=num_clients, shuffle=True, random_state=seed)
-            split_iter = splitter.split(X_train, y_train)
+    # 4.3 split train amongst num_clients
+    partition_strategy = str(kwargs.get("partition_strategy", "iid")).strip().lower()
+    if partition_strategy == "iid":
+        client_splits = _split_clients_iid(X_train, y_train, num_clients, task, seed)
+    elif partition_strategy == "dirichlet":
+        if task not in ("binary", "multiclass"):
+            logger.warning(
+                "Dirichlet partition requested for task=%s. Falling back to IID split.",
+                task,
+            )
+            client_splits = _split_clients_iid(X_train, y_train, num_clients, task, seed)
         else:
-            splitter = KFold(n_splits=num_clients, shuffle=True, random_state=seed)
-            split_iter = splitter.split(X_train)
-
-        client_splits = []
-        for _, client_idx in split_iter:
-            X_client = X_train.iloc[client_idx].reset_index(drop=True)
-            y_client = y_train.iloc[client_idx].reset_index(drop=True)
-            client_splits.append((X_client, y_client))
-        logger.info("Client splits: clients=%d", len(client_splits))
+            dirichlet_alpha = float(kwargs.get("dirichlet_alpha", 0.3))
+            min_client_samples = int(kwargs.get("min_client_samples", 1))
+            max_attempts = int(kwargs.get("dirichlet_max_attempts", 50))
+            client_splits = _split_clients_dirichlet(
+                X_train,
+                y_train,
+                num_clients,
+                seed=seed,
+                alpha=dirichlet_alpha,
+                min_client_samples=min_client_samples,
+                max_attempts=max_attempts,
+            )
+    else:
+        raise ValueError(f"Unknown partition_strategy '{partition_strategy}'. Use 'iid' or 'dirichlet'.")
+    logger.info(
+        "Client splits: strategy=%s clients=%d",
+        partition_strategy,
+        len(client_splits),
+    )
 
     # 5. create dataloaders
     batch_size = kwargs.get("batch_size", 64)
@@ -388,6 +475,7 @@ def load_dataset(dataset_path: str, dataset_meta_path: str, num_clients: int, **
     client_dataloaders = []
     client_num_means = []
     client_num_stds = []
+    client_cat_probs: list[dict[str, list[float]]] = []
     for client_idx, (X_client, y_client) in enumerate(client_splits):
         if num_cols:
             client_mean = X_client[num_cols].mean()
@@ -398,6 +486,27 @@ def load_dataset(dataset_path: str, dataset_meta_path: str, num_clients: int, **
         else:
             client_num_means.append(np.array([], dtype=np.float32))
             client_num_stds.append(np.array([], dtype=np.float32))
+
+        # Client-side categorical marginals are useful for prior baseline metrics.
+        cat_probs_for_client: dict[str, list[float]] = {}
+        current_idx = len(num_cols)
+        for col in cat_cols:
+            cats = encoder_meta["cat_categories"].get(col, [])
+            if isinstance(cats, dict):
+                cats = cats.get("categories", [])
+            n_cats = len(cats)
+            if n_cats <= 0 or current_idx + n_cats > X_client.shape[1]:
+                continue
+            probs = X_client.iloc[:, current_idx : current_idx + n_cats].mean(axis=0).to_numpy(dtype=np.float32)
+            total = float(np.sum(probs))
+            if total > 0:
+                probs = probs / total
+            else:
+                probs = np.full(n_cats, 1.0 / n_cats, dtype=np.float32)
+            cat_probs_for_client[col] = probs.tolist()
+            current_idx += n_cats
+        client_cat_probs.append(cat_probs_for_client)
+
         y_client_t = _encode_target(y_client, task, target_classes)
         client_ds = TensorDataset(
             torch.tensor(X_client.to_numpy(dtype=np.float32, copy=False), dtype=torch.float32),
@@ -455,6 +564,7 @@ def load_dataset(dataset_path: str, dataset_meta_path: str, num_clients: int, **
         "num_classes": len(target_classes) if task in ("binary", "multiclass") else 1,
         "client_num_mean": [m.tolist() for m in client_num_means],
         "client_num_std": [s.tolist() for s in client_num_stds],
+        "client_cat_probs": client_cat_probs,
     }
     logger.info("Feature schema: %s", feature_schema)
 

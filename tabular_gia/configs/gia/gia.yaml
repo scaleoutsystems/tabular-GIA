@@ -1,6 +1,7 @@
 fedsgd:
   attack_schedule: pow2
   invertingconfig:
+    label_known: true
     attack_lr: 0.03
     at_iterations: 1000
     data_extension: GiaTabularExtension
@@ -8,6 +9,7 @@ fedsgd:
 fedavg:
   attack_schedule: pow2
   invertingconfig:
+    label_known: true
     attack_lr: 0.03
     at_iterations: 1000
     data_extension: GiaTabularExtension

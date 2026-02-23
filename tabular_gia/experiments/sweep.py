@@ -181,6 +181,8 @@ def build_run_specs(
                 gia_cfg_root=gia_cfg_root,
                 gia_override=gia_override,
             )
+            if "attack_schedule" in base_cfg_run:
+                gia_cfg_run["attack_schedule"] = base_cfg_run["attack_schedule"]
 
             fl_cfg_run = copy.deepcopy(protocol_fl_defaults[protocol])
             fl_cfg_run.update(fl_override)
