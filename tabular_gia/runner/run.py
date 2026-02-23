@@ -175,7 +175,7 @@ def run(
                     last_i = int(i)
                     loss = -float(score) if score is not None else float("nan")
                     best_loss = float(attacker.best_loss)
-                    bar.set_postfix(loss=f"{loss:.6f}", best=f"{best_loss:.6f}")
+                    bar.set_postfix(loss=f"{loss:.6e}", best=f"{best_loss:.6e}")
                 if total_iters > 0 and last_i + 1 < total_iters:
                     bar.update(total_iters - (last_i + 1))
 
@@ -202,7 +202,7 @@ def run(
             metrics["client_idx"] = int(client_idx)
             tqdm.write(
                 f"GIA done: epoch={epoch_idx} round={round_idx} client={client_idx} "
-                f"best={float(attacker.best_loss):.6f}"
+                f"best={float(attacker.best_loss):.6e}"
             )
             return metrics
 

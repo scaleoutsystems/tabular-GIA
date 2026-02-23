@@ -58,8 +58,9 @@ def cosine_similarity_weights(client_gradient: torch.Tensor, reconstruction_grad
     rg = torch.cat([g.flatten() for g in filtered_trial_gradients])
 
     # compute the cosine similarity in double precision
-    cos = torch.nn.functional.cosine_similarity(cg.unsqueeze(0).double(),
-                              rg.unsqueeze(0).double()).clamp(-1.0, 1.0)
+    cos = torch.nn.functional.cosine_similarity(
+        cg.unsqueeze(0).double(),
+        rg.unsqueeze(0).double()).clamp(-1.0, 1.0)
     return (1.0 - cos).float()
 
 

@@ -91,8 +91,10 @@ def compute_reconstruction_metrics(
     cat_cols = feature_schema.get("cat_cols", [])
     cat_categories = feature_schema.get("cat_categories", {}) or {}
     num_count = len(num_cols)
+    has_num = num_count > 0
+    has_cat = len(cat_cols) > 0
     num_std = None
-    if num_count > 0:
+    if has_num:
         stds = feature_schema.get("client_num_std", [])
         num_std = np.asarray(stds[client_idx], dtype=np.float32)
 
@@ -111,15 +113,15 @@ def compute_reconstruction_metrics(
     )
 
     per_row_metrics = {
-        "num_acc": num_acc,
-        "cat_acc": cat_acc,
         "tableak_acc": tableak_acc,
         "nn_dist": nn_dist,
     }
+    if has_num:
+        per_row_metrics["num_acc"] = num_acc
+    if has_cat:
+        per_row_metrics["cat_acc"] = cat_acc
 
     aggregate_metrics = {
-        "num_acc": float(np.nanmean(num_acc)),
-        "cat_acc": float(np.nanmean(cat_acc)),
         "tableak_acc": float(np.nanmean(tableak_acc)),
         "emr": _emr(tableak_acc),
         "emr_90": _emr(tableak_acc, 0.9),
@@ -130,6 +132,10 @@ def compute_reconstruction_metrics(
         "nn_min": float(np.min(nn_dist)),
         "num_rows": int(orig_tensor.shape[0]),
     }
+    if has_num:
+        aggregate_metrics["num_acc"] = float(np.mean(num_acc))
+    if has_cat:
+        aggregate_metrics["cat_acc"] = float(np.mean(cat_acc))
 
     return {
         "per_row_metrics": per_row_metrics,

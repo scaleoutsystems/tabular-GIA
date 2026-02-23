@@ -1,12 +1,13 @@
 import argparse
 from pathlib import Path
 import logging
+from datetime import datetime
 
 import torch
 
 from leakpro.utils.seed import seed_everything
 
-from helper.helpers import read_yaml
+from helper.helpers import read_yaml, write_yaml
 from runner.run import run, run_sweep
 
 
@@ -56,14 +57,25 @@ def main(
         gia_cfg = gia_cfg_root.get(protocol)
         if gia_cfg is None or gia_cfg.get("invertingconfig") is None:
             raise ValueError(f"Missing GIA config at '{protocol}.invertingconfig'.")
-        results_dir = results_dir / "single_run" / protocol
+
+        run_id = f"experiment_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+        run_dir = results_dir / "single_run" / protocol / run_id
+        cfg_dir = run_dir / "configs"
+        artifacts_dir = run_dir / "artifacts"
+
+        write_yaml(cfg_dir / "base.yaml", base_cfg)
+        write_yaml(cfg_dir / "dataset" / "dataset.yaml", dataset_cfg)
+        write_yaml(cfg_dir / "model" / "model.yaml", model_cfg)
+        write_yaml(cfg_dir / "gia" / "gia.yaml", {protocol: gia_cfg})
+        write_yaml(cfg_dir / "fl" / f"{protocol}.yaml", fl_cfg)
+
         run(
             protocol=protocol,
             dataset_cfg=dataset_cfg,
             model_cfg=model_cfg,
             fl_cfg=fl_cfg,
             gia_cfg=gia_cfg,
-            results_dir=results_dir,
+            results_dir=artifacts_dir,
         )
     else:
         # run experiments
