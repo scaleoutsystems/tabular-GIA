@@ -319,7 +319,6 @@ def _weighted_metric_means(
 
 def summarize_round(
     metrics_list: List[Dict],
-    epoch_idx: int,
     round_idx: int,
 ) -> Dict | None:
     if not metrics_list:
@@ -331,7 +330,6 @@ def summarize_round(
     metric_means = _weighted_metric_means(metrics_list, weights, {"client_idx", "num_rows"})
 
     return {
-        "epoch": int(epoch_idx),
         "round": int(round_idx),
         "num_clients": int(len(metrics_list)),
         "total_rows": int(total_rows),
@@ -339,43 +337,7 @@ def summarize_round(
     }
 
 
-def write_round_summary(
-    results_dir: Path | str,
-    epoch_idx: int,
-    round_idx: int,
-    metrics_list: List[Dict],
-) -> Dict | None:
-    """Write aggregate reconstruction metrics for a round."""
-    if not metrics_list:
-        return None
-    out_dir = Path(results_dir) / f"epoch_{epoch_idx}" / f"round_{round_idx}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    clients_path = out_dir / f"round_{round_idx}_clients.csv"
-    summary_path = out_dir / f"round_{round_idx}_summary.csv"
-    metric_keys = [k for k in metrics_list[0].keys() if k != "client_idx"]
-
-    with open(clients_path, "w", encoding="utf-8") as f:
-        f.write(",".join(["epoch", "round", "client_idx", *metric_keys]) + "\n")
-        for m in metrics_list:
-            client_idx = int(m["client_idx"])
-            row = [epoch_idx, round_idx, client_idx, *(m[k] for k in metric_keys)]
-            f.write(",".join(str(v) for v in row) + "\n")
-
-    summary = summarize_round(metrics_list, epoch_idx, round_idx)
-    if summary is None:
-        return None
-
-    with open(summary_path, "w", encoding="utf-8") as f:
-        summary_keys = list(summary.keys())
-        f.write(",".join(summary_keys) + "\n")
-        f.write(",".join(str(summary[k]) for k in summary_keys) + "\n")
-    return summary
-
-
-def summarize_epoch(
-    epoch_idx: int,
-    round_summaries: List[Dict],
-) -> Dict | None:
+def summarize_run(round_summaries: List[Dict]) -> Dict | None:
     if not round_summaries:
         return None
     rows = np.array([r["total_rows"] for r in round_summaries], dtype=float)
@@ -384,43 +346,32 @@ def summarize_epoch(
     metric_means = _weighted_metric_means(
         round_summaries,
         weights,
-        {"epoch", "round", "num_clients", "total_rows"},
+        {"round", "num_clients", "total_rows"},
     )
     return {
-        "epoch": int(epoch_idx),
         "num_rounds": int(len(round_summaries)),
         "total_rows": int(total_rows),
         **metric_means,
     }
 
 
-def write_epoch_summary(results_dir: Path | str, epoch_summary: Dict) -> None:
-    epoch_idx = int(epoch_summary["epoch"])
-    out_dir = Path(results_dir) / f"epoch_{epoch_idx}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"epoch_{epoch_idx}_summary.csv"
-    summary_keys = list(epoch_summary.keys())
+def _write_rows_csv(out_path: Path, rows: List[Dict]) -> None:
+    if not rows:
+        return
+    fieldnames: list[str] = []
+    for row in rows:
+        for key in row.keys():
+            if key not in fieldnames:
+                fieldnames.append(key)
     with open(out_path, "w", encoding="utf-8") as f:
-        f.write(",".join(summary_keys) + "\n")
-        f.write(",".join(str(epoch_summary[k]) for k in summary_keys) + "\n")
+        f.write(",".join(fieldnames) + "\n")
+        for row in rows:
+            f.write(",".join(str(row.get(k, "")) for k in fieldnames) + "\n")
 
 
-def summarize_run(epoch_summaries: List[Dict]) -> Dict | None:
-    if not epoch_summaries:
-        return None
-    rows = np.array([e["total_rows"] for e in epoch_summaries], dtype=float)
-    total_rows = float(rows.sum()) if rows.size else 0.0
-    weights = rows / total_rows if total_rows > 0 else np.zeros_like(rows)
-    metric_means = _weighted_metric_means(
-        epoch_summaries,
-        weights,
-        {"epoch", "num_rounds", "total_rows"},
-    )
-    return {
-        "num_epochs": int(len(epoch_summaries)),
-        "total_rows": int(total_rows),
-        **metric_means,
-    }
+def write_rounds_summary(results_dir: Path | str, round_summaries: List[Dict]) -> None:
+    out_path = Path(results_dir) / "rounds_summary.csv"
+    _write_rows_csv(out_path, round_summaries)
 
 
 def write_run_summary(results_dir: Path | str, run_summary: Dict) -> None:
