@@ -621,7 +621,16 @@ def load_dataset(dataset_path: Path, dataset_meta_path: Path, num_clients: int, 
         "client_num_std": [s.tolist() for s in client_num_stds],
         "client_cat_probs": client_cat_probs,
     }
-    logger.info("Feature schema: %s", feature_schema)
+    schema_summary = {
+        "task": feature_schema["task"],
+        "num_features": feature_schema["num_features"],
+        "num_classes": feature_schema["num_classes"],
+        "num_numeric_cols": len(feature_schema["num_cols"]),
+        "num_categorical_cols": len(feature_schema["cat_cols"]),
+        "num_one_hot_cols": len(feature_schema["cat_dummy_cols"]),
+        "num_clients": len(feature_schema["client_num_mean"]),
+    }
+    logger.info("Feature schema summary: %s", schema_summary)
 
     return client_dataloaders, val_loader, test_loader, feature_schema
 
