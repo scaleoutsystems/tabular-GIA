@@ -59,6 +59,61 @@ def _fill_missing_values(
     return df
 
 
+def _get_schema_column_types(
+    X_train: pd.DataFrame,
+    meta: dict,
+) -> tuple[list[str] | None, list[str] | None]:
+    """Return (num_cols, cat_cols) from YAML schema when provided.
+
+    Behavior:
+    - If neither list is provided in YAML, return (None, None) to use inference.
+    - If provided, trust YAML lists and preserve feature-column order.
+    - Any columns not listed are inferred from the training split and appended.
+    """
+    yaml_num = meta.get("numerical_columns")
+    yaml_cat = meta.get("categorical_columns")
+    if yaml_num is None and yaml_cat is None:
+        return None, None
+
+    all_cols = X_train.columns.tolist()
+
+    yaml_num = list(yaml_num or [])
+    yaml_cat = list(yaml_cat or [])
+
+    missing_num = [c for c in yaml_num if c not in all_cols]
+    missing_cat = [c for c in yaml_cat if c not in all_cols]
+    if missing_num:
+        logger.warning("Ignoring %d YAML numerical columns not in data: %s", len(missing_num), missing_num[:10])
+    if missing_cat:
+        logger.warning("Ignoring %d YAML categorical columns not in data: %s", len(missing_cat), missing_cat[:10])
+
+    num_set = {c for c in yaml_num if c in all_cols}
+    cat_set = {c for c in yaml_cat if c in all_cols}
+
+    overlap = sorted(num_set.intersection(cat_set))
+    if overlap:
+        raise ValueError(
+            f"Columns present in both numerical_columns and categorical_columns: {overlap[:10]}"
+        )
+
+    remaining = [c for c in all_cols if c not in num_set and c not in cat_set]
+    if remaining:
+        inferred_num, inferred_cat = _infer_column_types(X_train[remaining])
+        logger.warning(
+            "YAML did not list %d feature columns; inferred remaining as num=%d, cat=%d",
+            len(remaining),
+            len(inferred_num),
+            len(inferred_cat),
+        )
+        num_set.update(inferred_num)
+        cat_set.update(inferred_cat)
+
+    # Keep deterministic column order matching source dataframe.
+    num_cols = [c for c in all_cols if c in num_set]
+    cat_cols = [c for c in all_cols if c in cat_set]
+    return num_cols, cat_cols
+
+
 def preprocess(
     X: pd.DataFrame,
     missing_values,
@@ -401,8 +456,16 @@ def load_dataset(dataset_path: Path, dataset_meta_path: Path, num_clients: int, 
             stratify=y_temp if task in ("binary", "multiclass") else None,
         )
 
-    # 4.1 preprocess splits without one-hot (infer types on train only)
-    X_train_split, num_cols, cat_cols = preprocess(X_train_split, missing_values)
+    # 4.1 preprocess splits without one-hot
+    # Prefer YAML-declared schema when available to avoid re-classifying
+    # integer prior indicators as categorical.
+    schema_num_cols, schema_cat_cols = _get_schema_column_types(X_train_split, meta)
+    X_train_split, num_cols, cat_cols = preprocess(
+        X_train_split,
+        missing_values,
+        num_cols=schema_num_cols,
+        cat_cols=schema_cat_cols,
+    )
     X_val_split, _, _ = preprocess(
         X_val_split,
         missing_values,
