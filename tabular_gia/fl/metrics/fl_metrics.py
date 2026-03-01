@@ -4,6 +4,8 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+FL_METRIC_FIELDS = ("loss", "acc", "f1_macro", "mse", "mae", "r2")
+
 
 def _f1_macro_multiclass(conf_mat: torch.Tensor) -> float:
     tp = conf_mat.diag().float()

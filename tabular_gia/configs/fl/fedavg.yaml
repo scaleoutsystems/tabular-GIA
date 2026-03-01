@@ -1,7 +1,6 @@
-full_dataset_passes: 100 # meaning how many full dataset passes
-local_steps: 1 # meaning how many batches to process. simulates data availability at clients. this scales compute. higher > fewer rounds but heavier compute per round. lower > more rounds and less compute per round
-local_epochs: 1 # meaning how many iterations of local training steps. this scales compute. higher > fewer full dataset passes but heavier compute per full dataset pass. lower > more full dataset passes and less compute per full dataset pass
+local_steps: all # integer minibatch steps per round, or 'all' for one full local dataloader pass per round (classic FedAvg)
+local_epochs: 1 # meaning how many iterations over local_steps batches each communication round
 num_clients: 3
-client_participation: 1.0
-optimizer: MetaSGD
-lr: 0.01
+min_exposure: 100.0 # stop when least-exposed client reaches this effective pass count
+optimizer: MetaAdam
+lr: 0.1

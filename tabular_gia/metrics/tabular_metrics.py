@@ -1,5 +1,6 @@
 """Evaluation metrics for tabular gradient inversion attacks."""
 
+import csv
 from pathlib import Path
 from typing import Dict, List
 
@@ -10,6 +11,51 @@ from torch.utils.data import DataLoader
 from tabulate import tabulate
 from scipy.optimize import linear_sum_assignment
 from tabular_gia.fl.dataloader.tabular_dataloader import denormalize_numeric
+
+
+ATTACK_METRIC_FIELDS = (
+    "tableak_acc",
+    "gain_tableak_over_prior",
+    "prior_tableak_acc",
+    "emr",
+    "emr_90",
+    "emr_80",
+    "emr_60",
+    "nn_mean",
+    "nn_min",
+    "dist_conf",
+    "num_acc",
+    "gain_num_over_prior",
+    "prior_num_acc",
+    "num_dist_conf",
+    "num_within_1std",
+    "num_within_2std",
+    "cat_acc",
+    "gain_cat_over_prior",
+    "prior_cat_acc",
+    "cat_dist_conf",
+)
+
+ROUNDS_SUMMARY_CSV_FIELDS = (
+    "round",
+    "num_clients",
+    "total_rows",
+    "exp_min",
+    "exp_avg",
+    "exp_max",
+    "client_exp",
+    *ATTACK_METRIC_FIELDS,
+)
+
+RUN_SUMMARY_CSV_FIELDS = (
+    "num_rounds",
+    "total_rows",
+    "exp_min",
+    "exp_avg",
+    "exp_max",
+    "client_exp",
+    *ATTACK_METRIC_FIELDS,
+)
 
 
 def _format_value(value: object) -> str:
@@ -91,8 +137,10 @@ def compute_reconstruction_metrics(
     cat_cols = feature_schema.get("cat_cols", [])
     cat_categories = feature_schema.get("cat_categories", {}) or {}
     num_count = len(num_cols)
+    has_num = num_count > 0
+    has_cat = len(cat_cols) > 0
     num_std = None
-    if num_count > 0:
+    if has_num:
         stds = feature_schema.get("client_num_std", [])
         num_std = np.asarray(stds[client_idx], dtype=np.float32)
 
@@ -111,18 +159,18 @@ def compute_reconstruction_metrics(
     )
 
     per_row_metrics = {
-        "num_acc": num_acc,
-        "cat_acc": cat_acc,
         "tableak_acc": tableak_acc,
         "nn_dist": nn_dist,
     }
+    if has_num:
+        per_row_metrics["num_acc"] = num_acc
+    if has_cat:
+        per_row_metrics["cat_acc"] = cat_acc
 
     prior_metrics = _prior_baseline_metrics(orig_tensor, feature_schema, client_idx, num_std)
     distribution_metrics = _distribution_confidence_metrics(recon_tensor, feature_schema, client_idx)
 
     aggregate_metrics = {
-        "num_acc": float(np.nanmean(num_acc)),
-        "cat_acc": float(np.nanmean(cat_acc)),
         "tableak_acc": float(np.nanmean(tableak_acc)),
         "emr": _emr(tableak_acc),
         "emr_90": _emr(tableak_acc, 0.9),
@@ -132,14 +180,24 @@ def compute_reconstruction_metrics(
         "nn_median": float(np.median(nn_dist)),
         "nn_min": float(np.min(nn_dist)),
         "num_rows": int(orig_tensor.shape[0]),
-        **prior_metrics,
-        **distribution_metrics,
+        "prior_tableak_acc": prior_metrics["prior_tableak_acc"],
+        "gain_tableak_over_prior": float(np.nanmean(tableak_acc)) - prior_metrics["prior_tableak_acc"],
+        "dist_conf": distribution_metrics["dist_conf"],
     }
-    aggregate_metrics["gain_num_over_prior"] = aggregate_metrics["num_acc"] - aggregate_metrics["prior_num_acc"]
-    aggregate_metrics["gain_cat_over_prior"] = aggregate_metrics["cat_acc"] - aggregate_metrics["prior_cat_acc"]
-    aggregate_metrics["gain_tableak_over_prior"] = (
-        aggregate_metrics["tableak_acc"] - aggregate_metrics["prior_tableak_acc"]
-    )
+    if has_num:
+        aggregate_metrics["num_acc"] = float(np.mean(num_acc))
+        if "prior_num_acc" in prior_metrics:
+            aggregate_metrics["prior_num_acc"] = prior_metrics["prior_num_acc"]
+            aggregate_metrics["gain_num_over_prior"] = aggregate_metrics["num_acc"] - prior_metrics["prior_num_acc"]
+        aggregate_metrics["num_dist_conf"] = distribution_metrics["num_dist_conf"]
+        aggregate_metrics["num_within_1std"] = distribution_metrics["num_within_1std"]
+        aggregate_metrics["num_within_2std"] = distribution_metrics["num_within_2std"]
+    if has_cat:
+        aggregate_metrics["cat_acc"] = float(np.mean(cat_acc))
+        if "prior_cat_acc" in prior_metrics:
+            aggregate_metrics["prior_cat_acc"] = prior_metrics["prior_cat_acc"]
+            aggregate_metrics["gain_cat_over_prior"] = aggregate_metrics["cat_acc"] - prior_metrics["prior_cat_acc"]
+        aggregate_metrics["cat_dist_conf"] = distribution_metrics["cat_dist_conf"]
 
     return {
         "per_row_metrics": per_row_metrics,
@@ -210,11 +268,14 @@ def _prior_baseline_metrics(
         feature_schema.get("cat_categories", {}) or {},
         num_std,
     )
-    return {
-        "prior_num_acc": float(np.nanmean(prior_num_acc)),
-        "prior_cat_acc": float(np.nanmean(prior_cat_acc)),
+    metrics: Dict[str, float] = {
         "prior_tableak_acc": float(np.nanmean(prior_tableak)),
     }
+    if num_count > 0:
+        metrics["prior_num_acc"] = float(np.mean(prior_num_acc))
+    if len(cat_cols) > 0:
+        metrics["prior_cat_acc"] = float(np.mean(prior_cat_acc))
+    return metrics
 
 
 def _distribution_confidence_metrics(
@@ -304,7 +365,6 @@ def _weighted_metric_means(
 
 def summarize_round(
     metrics_list: List[Dict],
-    epoch_idx: int,
     round_idx: int,
 ) -> Dict | None:
     if not metrics_list:
@@ -316,7 +376,6 @@ def summarize_round(
     metric_means = _weighted_metric_means(metrics_list, weights, {"client_idx", "num_rows"})
 
     return {
-        "epoch": int(epoch_idx),
         "round": int(round_idx),
         "num_clients": int(len(metrics_list)),
         "total_rows": int(total_rows),
@@ -324,43 +383,7 @@ def summarize_round(
     }
 
 
-def write_round_summary(
-    results_dir: Path | str,
-    epoch_idx: int,
-    round_idx: int,
-    metrics_list: List[Dict],
-) -> Dict | None:
-    """Write aggregate reconstruction metrics for a round."""
-    if not metrics_list:
-        return None
-    out_dir = Path(results_dir) / f"epoch_{epoch_idx}" / f"round_{round_idx}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    clients_path = out_dir / f"round_{round_idx}_clients.csv"
-    summary_path = out_dir / f"round_{round_idx}_summary.csv"
-    metric_keys = [k for k in metrics_list[0].keys() if k != "client_idx"]
-
-    with open(clients_path, "w", encoding="utf-8") as f:
-        f.write(",".join(["epoch", "round", "client_idx", *metric_keys]) + "\n")
-        for m in metrics_list:
-            client_idx = int(m["client_idx"])
-            row = [epoch_idx, round_idx, client_idx, *(m[k] for k in metric_keys)]
-            f.write(",".join(str(v) for v in row) + "\n")
-
-    summary = summarize_round(metrics_list, epoch_idx, round_idx)
-    if summary is None:
-        return None
-
-    with open(summary_path, "w", encoding="utf-8") as f:
-        summary_keys = list(summary.keys())
-        f.write(",".join(summary_keys) + "\n")
-        f.write(",".join(str(summary[k]) for k in summary_keys) + "\n")
-    return summary
-
-
-def summarize_epoch(
-    epoch_idx: int,
-    round_summaries: List[Dict],
-) -> Dict | None:
+def summarize_run(round_summaries: List[Dict]) -> Dict | None:
     if not round_summaries:
         return None
     rows = np.array([r["total_rows"] for r in round_summaries], dtype=float)
@@ -369,51 +392,41 @@ def summarize_epoch(
     metric_means = _weighted_metric_means(
         round_summaries,
         weights,
-        {"epoch", "round", "num_clients", "total_rows"},
+        {"round", "num_clients", "total_rows"},
     )
     return {
-        "epoch": int(epoch_idx),
         "num_rounds": int(len(round_summaries)),
         "total_rows": int(total_rows),
         **metric_means,
     }
 
 
-def write_epoch_summary(results_dir: Path | str, epoch_summary: Dict) -> None:
-    epoch_idx = int(epoch_summary["epoch"])
-    out_dir = Path(results_dir) / f"epoch_{epoch_idx}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / f"epoch_{epoch_idx}_summary.csv"
-    summary_keys = list(epoch_summary.keys())
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(",".join(summary_keys) + "\n")
-        f.write(",".join(str(epoch_summary[k]) for k in summary_keys) + "\n")
+def _prepare_fixed_row(row: Dict, fieldnames: tuple[str, ...], file_label: str) -> dict:
+    unknown = sorted(set(row.keys()) - set(fieldnames))
+    if unknown:
+        raise ValueError(f"Unexpected {file_label} fields: {unknown}")
+    return {field: row.get(field, "") for field in fieldnames}
 
 
-def summarize_run(epoch_summaries: List[Dict]) -> Dict | None:
-    if not epoch_summaries:
-        return None
-    rows = np.array([e["total_rows"] for e in epoch_summaries], dtype=float)
-    total_rows = float(rows.sum()) if rows.size else 0.0
-    weights = rows / total_rows if total_rows > 0 else np.zeros_like(rows)
-    metric_means = _weighted_metric_means(
-        epoch_summaries,
-        weights,
-        {"epoch", "num_rounds", "total_rows"},
-    )
-    return {
-        "num_epochs": int(len(epoch_summaries)),
-        "total_rows": int(total_rows),
-        **metric_means,
-    }
+def _write_rows_csv(out_path: Path, rows: List[Dict], fieldnames: tuple[str, ...], file_label: str) -> None:
+    if not rows:
+        return
+    ordered_rows = [_prepare_fixed_row(row, fieldnames, file_label) for row in rows]
+    with open(out_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(fieldnames))
+        writer.writeheader()
+        for row in ordered_rows:
+            writer.writerow(row)
+
+
+def write_rounds_summary(results_dir: Path | str, round_summaries: List[Dict]) -> None:
+    out_path = Path(results_dir) / "rounds_summary.csv"
+    _write_rows_csv(out_path, round_summaries, ROUNDS_SUMMARY_CSV_FIELDS, "rounds_summary.csv")
 
 
 def write_run_summary(results_dir: Path | str, run_summary: Dict) -> None:
     out_path = Path(results_dir) / "run_summary.csv"
-    summary_keys = list(run_summary.keys())
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(",".join(summary_keys) + "\n")
-        f.write(",".join(str(run_summary[k]) for k in summary_keys) + "\n")
+    _write_rows_csv(out_path, [run_summary], RUN_SUMMARY_CSV_FIELDS, "run_summary.csv")
 
 
 def _get_feature_groups(feature_info: Dict, total_dim: int) -> tuple[list[int], list[list[int]]]:

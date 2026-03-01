@@ -1,3 +1,4 @@
+import json
 import yaml
 from pathlib import Path
 
@@ -11,3 +12,9 @@ def write_yaml(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         yaml.safe_dump(payload, f, sort_keys=False)
+
+
+def write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)

@@ -32,15 +32,11 @@ fl:
     # Client/data-scale axis (one value fixed, multiple values expand runs).
     # Example: [3, 10, 30]
     num_clients: [10]
-    full_dataset_passes: [1]
-    client_participation: [1.0, 0.5]
   fedavg:
     # Keep this list short unless you also tune batch_size, otherwise tiny client shards can fail with drop_last=True.
     num_clients: [3]
-    full_dataset_passes: [1]
     local_steps: [1, 10, 100]
     local_epochs: [1, 10, 100]
-    client_participation: [1.0, 0.5]
 
 # gia sweeps over invertingconfig overrides
 gia:

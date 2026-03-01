@@ -114,8 +114,13 @@ class AbstractGIA(AbstractAttack):
         optimizer = torch.optim.Adam([reconstruction], lr=attack_lr)
         # Initialize best reconstruction fallback
         best_reconstruction_tensor = reconstruction.detach().clone()
-        self.best_reconstruction = _loader_from_tensor(best_reconstruction_tensor)
-        self.final_best = self.best_reconstruction
+        if is_tabular:
+            # Avoid rebuilding DataLoader objects in the tabular hot loop.
+            self.best_reconstruction = None
+            self.final_best = None
+        else:
+            self.best_reconstruction = _loader_from_tensor(best_reconstruction_tensor)
+            self.final_best = self.best_reconstruction
         # reduce LR every 1/3 of total iterations
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
                                                             milestones=[at_iterations // 2.667,
@@ -141,7 +146,8 @@ class AbstractGIA(AbstractAttack):
                     self.best_loss = loss_value
                     # the loader before the step was the one that gave the good loss value
                     best_reconstruction_tensor = pre_step_reconstruction
-                    self.best_reconstruction = _loader_from_tensor(best_reconstruction_tensor)
+                    if not is_tabular:
+                        self.best_reconstruction = _loader_from_tensor(best_reconstruction_tensor)
                     self.best_reconstruction_round = i
                     logger.info(f"New best loss: {self.best_loss} on round: {i}")
 
@@ -166,26 +172,14 @@ class AbstractGIA(AbstractAttack):
             logger.info(f"Attack stopped due to {e}. \
                         Saving results.")
         if is_tabular:
-            # Enforce constraints on best reconstruction before metrics
-            if hasattr(configs.data_extension, 'enforce_constraints'):
-                # Note: best_reconstruction is a DataLoader. We need to extract tensor, enforce, and repack?
-                # Actually, Tabular GIA used 'best_reconstruction' as Tensor internally. 
-                # AbstractGIA uses it as DataLoader. This is a mismatch.
-                # However, generic_attack_loop takes 'reconstruction' (Tensor).
-                # best_reconstruction is updated as deepcopy(pre_step_loader).
-                # Let's rely on the result generator to handle final processing or 
-                # blindly trust the periodic enforcement was enough.
-                pass
-            
+            # Build once after optimization to keep downstream interfaces unchanged.
+            self.best_reconstruction = _loader_from_tensor(best_reconstruction_tensor)
             # Compute simple tabular reconstruction metrics
             orig_tensor = torch.cat([batch[0] for batch in client_loader], dim=0)
-            
+
             # Re-collect tensor from best reconstruction snapshot
             recon_tensor = best_reconstruction_tensor
-            
-            #if hasattr(configs.data_extension, 'enforce_constraints'):
-            #     recon_tensor = configs.data_extension.enforce_constraints(recon_tensor)
-            
+
             mse = torch.mean((orig_tensor - recon_tensor) ** 2).item()
             mae = torch.mean(torch.abs(orig_tensor - recon_tensor)).item()
             rmse = mse ** 0.5
