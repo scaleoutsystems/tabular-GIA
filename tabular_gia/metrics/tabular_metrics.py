@@ -1,5 +1,6 @@
 """Evaluation metrics for tabular gradient inversion attacks."""
 
+import csv
 from pathlib import Path
 from typing import Dict, List
 
@@ -10,6 +11,51 @@ from torch.utils.data import DataLoader
 from tabulate import tabulate
 from scipy.optimize import linear_sum_assignment
 from tabular_gia.fl.dataloader.tabular_dataloader import denormalize_numeric
+
+
+ATTACK_METRIC_FIELDS = (
+    "tableak_acc",
+    "gain_tableak_over_prior",
+    "prior_tableak_acc",
+    "emr",
+    "emr_90",
+    "emr_80",
+    "emr_60",
+    "nn_mean",
+    "nn_min",
+    "dist_conf",
+    "num_acc",
+    "gain_num_over_prior",
+    "prior_num_acc",
+    "num_dist_conf",
+    "num_within_1std",
+    "num_within_2std",
+    "cat_acc",
+    "gain_cat_over_prior",
+    "prior_cat_acc",
+    "cat_dist_conf",
+)
+
+ROUNDS_SUMMARY_CSV_FIELDS = (
+    "round",
+    "num_clients",
+    "total_rows",
+    "exp_min",
+    "exp_avg",
+    "exp_max",
+    "client_exp",
+    *ATTACK_METRIC_FIELDS,
+)
+
+RUN_SUMMARY_CSV_FIELDS = (
+    "num_rounds",
+    "total_rows",
+    "exp_min",
+    "exp_avg",
+    "exp_max",
+    "client_exp",
+    *ATTACK_METRIC_FIELDS,
+)
 
 
 def _format_value(value: object) -> str:
@@ -355,31 +401,32 @@ def summarize_run(round_summaries: List[Dict]) -> Dict | None:
     }
 
 
-def _write_rows_csv(out_path: Path, rows: List[Dict]) -> None:
+def _prepare_fixed_row(row: Dict, fieldnames: tuple[str, ...], file_label: str) -> dict:
+    unknown = sorted(set(row.keys()) - set(fieldnames))
+    if unknown:
+        raise ValueError(f"Unexpected {file_label} fields: {unknown}")
+    return {field: row.get(field, "") for field in fieldnames}
+
+
+def _write_rows_csv(out_path: Path, rows: List[Dict], fieldnames: tuple[str, ...], file_label: str) -> None:
     if not rows:
         return
-    fieldnames: list[str] = []
-    for row in rows:
-        for key in row.keys():
-            if key not in fieldnames:
-                fieldnames.append(key)
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(",".join(fieldnames) + "\n")
-        for row in rows:
-            f.write(",".join(str(row.get(k, "")) for k in fieldnames) + "\n")
+    ordered_rows = [_prepare_fixed_row(row, fieldnames, file_label) for row in rows]
+    with open(out_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(fieldnames))
+        writer.writeheader()
+        for row in ordered_rows:
+            writer.writerow(row)
 
 
 def write_rounds_summary(results_dir: Path | str, round_summaries: List[Dict]) -> None:
     out_path = Path(results_dir) / "rounds_summary.csv"
-    _write_rows_csv(out_path, round_summaries)
+    _write_rows_csv(out_path, round_summaries, ROUNDS_SUMMARY_CSV_FIELDS, "rounds_summary.csv")
 
 
 def write_run_summary(results_dir: Path | str, run_summary: Dict) -> None:
     out_path = Path(results_dir) / "run_summary.csv"
-    summary_keys = list(run_summary.keys())
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(",".join(summary_keys) + "\n")
-        f.write(",".join(str(run_summary[k]) for k in summary_keys) + "\n")
+    _write_rows_csv(out_path, [run_summary], RUN_SUMMARY_CSV_FIELDS, "run_summary.csv")
 
 
 def _get_feature_groups(feature_info: Dict, total_dim: int) -> tuple[list[int], list[list[int]]]:

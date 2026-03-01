@@ -72,6 +72,9 @@ def run_fedsgd(
     client_iters = [iter(dl) for dl in client_dataloaders]
     examples_seen = [0 for _ in range(num_clients)]
     next_val_exposure = 1.0 if val is not None else float("inf")
+    best_val_loss = float("inf")
+    best_round = 0
+    best_state_dict = None
 
     def _next_batch(client_idx: int):
         try:
@@ -153,6 +156,12 @@ def run_fedsgd(
             if crossed_val_checkpoint:
                 train_stats = eval_epoch(client_dataloaders, global_model, criterion, task)
                 val_stats = eval_epoch([val], global_model, criterion, task) if val is not None else None
+                if val_stats is not None:
+                    val_loss = float(val_stats["loss"])
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        best_round = int(round_idx)
+                        best_state_dict = {k: v.detach().cpu().clone() for k, v in global_model.state_dict().items()}
                 if fl_metrics_fn is not None:
                     metric_keys = list(train_stats.keys()) if train_stats is not None else (list(val_stats.keys()) if val_stats is not None else [])
                     row = {
@@ -211,13 +220,18 @@ def run_fedsgd(
             max(final_exposures),
         )
 
+    if best_state_dict is not None:
+        global_model.load_state_dict(best_state_dict)
+        logger.info("Loaded best validation checkpoint: round=%d val_loss=%.4f", best_round, best_val_loss)
+
     # 7. perform final evaluation on test dataloader
     test_stats = eval_epoch([test], global_model, criterion, task)
     if fl_metrics_fn is not None:
         metric_keys = list(test_stats.keys()) if test_stats is not None else []
+        tested_round = int(best_round) if best_state_dict is not None else int(executed_rounds)
         row = {
             "phase": "final_test",
-            "round": int(executed_rounds),
+            "round": tested_round,
             "exp_min": float(min(final_exposures)) if client_n_eff else float("nan"),
             "exp_avg": float(sum(final_exposures) / len(final_exposures)) if client_n_eff else float("nan"),
             "exp_max": float(max(final_exposures)) if client_n_eff else float("nan"),

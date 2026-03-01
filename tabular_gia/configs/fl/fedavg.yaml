@@ -2,5 +2,5 @@ local_steps: all # integer minibatch steps per round, or 'all' for one full loca
 local_epochs: 1 # meaning how many iterations over local_steps batches each communication round
 num_clients: 3
 min_exposure: 100.0 # stop when least-exposed client reaches this effective pass count
-optimizer: MetaSGD
-lr: 0.01
+optimizer: MetaAdam
+lr: 0.1

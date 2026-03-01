@@ -1,15 +1,19 @@
-"""Experiment sweep utilities."""
-
 from __future__ import annotations
 
-import copy
+import csv
 import itertools
+import json
+from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from tqdm import tqdm
 
-from helper.helpers import read_yaml
+from helper.helpers import read_yaml, write_json
+from leakpro.utils.seed import seed_everything
+from metrics.tabular_metrics import RUN_SUMMARY_CSV_FIELDS
+from tabular_gia.runner.run import RunEngine, RunSpec
 
 
 def _iter_grid(grid: dict[str, list[Any]]):
@@ -59,7 +63,7 @@ def _iter_run_combos(
 
 
 def _resolve_dataset_cfg(dataset_cfg: dict[str, Any], dataset_override: dict[str, Any], config_dir: Path) -> dict[str, Any]:
-    dataset_cfg_run = copy.deepcopy(dataset_cfg)
+    dataset_cfg_run = deepcopy(dataset_cfg)
     for dataset_key, value in dataset_override.items():
         if dataset_key == "dataset_path_and_meta_path":
             dataset_cfg_run["dataset_path"], dataset_cfg_run["dataset_meta_path"] = value
@@ -83,8 +87,8 @@ def _resolve_model_cfg(
         preset_cfg = presets.get(preset_name)
         if preset_cfg is None:
             raise ValueError(f"Preset '{preset_name}' not found in model config.")
-        return copy.deepcopy(preset_cfg)
-    return copy.deepcopy(model_override)
+        return deepcopy(preset_cfg)
+    return deepcopy(model_override)
 
 
 def _resolve_gia_cfg(
@@ -93,7 +97,7 @@ def _resolve_gia_cfg(
     gia_cfg_root: dict[str, Any],
     gia_override: dict[str, Any],
 ) -> dict[str, Any]:
-    protocol_cfg = copy.deepcopy(gia_cfg_root.get(protocol, {}))
+    protocol_cfg = deepcopy(gia_cfg_root.get(protocol, {}))
     invertingconfig = protocol_cfg.get("invertingconfig")
     if invertingconfig is None:
         if not gia_override:
@@ -105,16 +109,15 @@ def _resolve_gia_cfg(
     protocol_cfg["invertingconfig"] = invertingconfig
     return protocol_cfg
 
+
 def build_run_specs(
     sweep_cfg: dict[str, Any],
     *,
     base_cfg: dict[str, Any],
     dataset_cfg: dict[str, Any],
     model_cfg: dict[str, Any],
-    config_dir: Path
+    config_dir: Path,
 ) -> list[dict[str, Any]]:
-    """Build resolved run configurations from in-memory sweep and base configs."""
-
     gia_cfg_root = read_yaml(config_dir / "gia" / "gia.yaml")
 
     base_section = sweep_cfg["base"]
@@ -166,7 +169,7 @@ def build_run_specs(
             bar.update(1)
             run_id += 1
 
-            base_cfg_run = copy.deepcopy(base_cfg)
+            base_cfg_run = deepcopy(base_cfg)
             base_cfg_run["protocol"] = protocol
             base_cfg_run.update(base_override)
 
@@ -184,7 +187,7 @@ def build_run_specs(
             if "attack_schedule" in base_cfg_run:
                 gia_cfg_run["attack_schedule"] = base_cfg_run["attack_schedule"]
 
-            fl_cfg_run = copy.deepcopy(protocol_fl_defaults[protocol])
+            fl_cfg_run = deepcopy(protocol_fl_defaults[protocol])
             fl_cfg_run.update(fl_override)
 
             overrides = {
@@ -207,3 +210,114 @@ def build_run_specs(
             )
 
     return run_specs
+
+
+SWEEP_RESULTS_CSV_FIELDS = (
+    "run_id",
+    "overrides_json",
+    *RUN_SUMMARY_CSV_FIELDS,
+)
+
+
+class SweepExperimentRunner:
+    def __init__(
+        self,
+        *,
+        sweep_cfg: dict,
+        base_cfg: dict,
+        dataset_cfg: dict,
+        model_cfg: dict,
+        config_dir: Path,
+        results_dir: Path,
+        fl_only: bool = False,
+    ) -> None:
+        self.sweep_cfg = sweep_cfg
+        self.base_cfg = base_cfg
+        self.dataset_cfg = dataset_cfg
+        self.model_cfg = model_cfg
+        self.config_dir = config_dir
+        self.results_dir = results_dir
+        self.fl_only = fl_only
+
+    def _write_sweep_results_csv(self, out_path: Path, rows: list[dict]) -> None:
+        if not rows:
+            return
+        for row in rows:
+            unknown = sorted(set(row.keys()) - set(SWEEP_RESULTS_CSV_FIELDS))
+            if unknown:
+                raise ValueError(f"Unexpected sweep_results.csv fields: {unknown}")
+        ordered_rows = [{field: row.get(field, "") for field in SWEEP_RESULTS_CSV_FIELDS} for row in rows]
+        with open(out_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(SWEEP_RESULTS_CSV_FIELDS))
+            writer.writeheader()
+            for row in ordered_rows:
+                writer.writerow(row)
+
+    def run(self) -> None:
+        experiment_id = f"experiment_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+        experiment_dir = self.results_dir / experiment_id
+        run_specs = build_run_specs(
+            sweep_cfg=self.sweep_cfg,
+            base_cfg=self.base_cfg,
+            dataset_cfg=self.dataset_cfg,
+            model_cfg=self.model_cfg,
+            config_dir=self.config_dir,
+        )
+        experiment_dir.mkdir(parents=True, exist_ok=True)
+
+        run_records: list[dict] = []
+        sweep_result_rows: list[dict] = []
+        for spec in run_specs:
+            run_id = int(spec["run_id"])
+            protocol = str(spec["base_cfg"]["protocol"])
+            run_seed = int(spec["base_cfg"]["seed"])
+            seed_everything(run_seed)
+
+            dataset_cfg_run = deepcopy(spec["dataset_cfg"])
+            dataset_cfg_run["seed"] = run_seed
+
+            run_dir = experiment_dir / f"run_{run_id:04d}"
+            write_json(
+                run_dir / "resolved_config.json",
+                {
+                    "base": spec["base_cfg"],
+                    "dataset": dataset_cfg_run,
+                    "model": spec["model_cfg"],
+                    "gia": {protocol: spec["gia_cfg"]},
+                    "fl": spec["fl_cfg"],
+                    "overrides": spec.get("overrides", {}),
+                },
+            )
+
+            run_spec = RunSpec(
+                protocol=protocol,
+                dataset_cfg=dataset_cfg_run,
+                model_cfg=deepcopy(spec["model_cfg"]),
+                fl_cfg=deepcopy(spec["fl_cfg"]),
+                gia_cfg=deepcopy(spec["gia_cfg"]),
+                results_dir=run_dir / "artifacts",
+                fl_only=self.fl_only,
+            )
+            run_summary = RunEngine(run_spec).run()
+
+            row = {
+                "run_id": run_id,
+                "overrides_json": json.dumps(spec.get("overrides", {}), sort_keys=True),
+            }
+            if run_summary is not None:
+                row.update(run_summary)
+            sweep_result_rows.append(row)
+
+            run_records.append(
+                {
+                    "run_id": run_id,
+                    "protocol": protocol,
+                    "seed": run_seed,
+                    "run_dir": str(run_dir),
+                    "overrides": spec.get("overrides", {}),
+                }
+            )
+
+        with open(experiment_dir / "sweep_runs.json", "w", encoding="utf-8") as f:
+            json.dump(run_records, f, indent=2)
+        self._write_sweep_results_csv(experiment_dir / "sweep_results.csv", sweep_result_rows)
