@@ -184,3 +184,9 @@ nohup*
 tabular_gia/results.txt
 /results.txt
 tabular_gia/data/**/checkpoints/
+# Large external clinical dataset (local only)
+tabular_gia/data/mimic-iv-3.1/
+tabular_gia/data/mimic-iv-3.1 unextracted/
+tabular_gia/data/binary/mimic_iv_icu_mortality/
+tabular_gia/data/binary/mimic_iv_admission_mortality/
+tabular_gia/data/binary/mimic_iv_admission_mortality_strict/
