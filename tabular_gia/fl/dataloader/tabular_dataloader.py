@@ -215,6 +215,16 @@ def _split_target(df: pd.DataFrame, target, no_header) -> tuple[pd.DataFrame, pd
     return X, y
 
 
+def _resolve_split_path(split_path: str, dataset_path: str) -> Path:
+    p = Path(split_path)
+    if p.is_absolute():
+        return p
+    candidate = Path(dataset_path).parent / p
+    if candidate.exists():
+        return candidate
+    return p
+
+
 def _infer_task_and_clean(
     y: pd.Series,
     missing_values,
@@ -240,6 +250,27 @@ def _infer_task_and_clean(
         return y_num, task, keep_mask
 
     return y_num, "regression", keep_mask
+
+
+def _clean_target_only(
+    y: pd.Series,
+    missing_values,
+) -> tuple[pd.Series, pd.Series]:
+    """Clean target values without inferring task type.
+
+    Useful for external val/test splits where train split already defines task.
+    """
+    if missing_values is not None:
+        y = y.replace(missing_values, pd.NA)
+
+    dtype_str = str(y.dtype)
+    if dtype_str == "object" or dtype_str.startswith("category"):
+        keep_mask = y.notna()
+        return y.loc[keep_mask].reset_index(drop=True), keep_mask
+
+    y_num = pd.to_numeric(y, errors="coerce")
+    keep_mask = y_num.notna()
+    return y_num.loc[keep_mask].reset_index(drop=True), keep_mask
 
 
 def _encode_target(y: pd.Series, task: str, target_classes: list | None) -> torch.Tensor:
@@ -375,8 +406,31 @@ def load_dataset(dataset_path: str, dataset_meta_path: str, num_clients: int, **
     test_frac = kwargs.get("test_frac", 0.15)
     stratify_labels = y if task in ("binary", "multiclass") else None
 
+    val_path = meta.get("has_val_split")
     test_path = meta.get("has_test_split")
-    if test_path:
+    if val_path and test_path:
+        logger.info("External val+test splits provided: val=%s test=%s", val_path, test_path)
+        X_train_split = X_full.reset_index(drop=True)
+        y_train = y.reset_index(drop=True)
+
+        val_path_resolved = _resolve_split_path(str(val_path), dataset_path)
+        test_path_resolved = _resolve_split_path(str(test_path), dataset_path)
+
+        if no_header:
+            val_df = pd.read_csv(val_path_resolved, header=None)
+            test_df = pd.read_csv(test_path_resolved, header=None)
+        else:
+            val_df = pd.read_csv(val_path_resolved)
+            test_df = pd.read_csv(test_path_resolved)
+
+        X_val_split, y_val_split = _split_target(val_df, target, no_header)
+        y_val, keep_mask_val = _clean_target_only(y_val_split, missing_values)
+        X_val_split = X_val_split.loc[keep_mask_val].reset_index(drop=True)
+
+        X_test_split, y_test_split = _split_target(test_df, target, no_header)
+        y_test, keep_mask_test = _clean_target_only(y_test_split, missing_values)
+        X_test_split = X_test_split.loc[keep_mask_test].reset_index(drop=True)
+    elif test_path:
         logger.info("External test split provided: %s", test_path)
         val_ratio = val_frac / max(1e-8, (train_frac + val_frac))
         X_train_split, X_val_split, y_train, y_val = train_test_split(
@@ -386,18 +440,16 @@ def load_dataset(dataset_path: str, dataset_meta_path: str, num_clients: int, **
             random_state=seed,
             stratify=stratify_labels,
         )
-        test_path = Path(test_path)
-        #if not test_path.is_absolute():
-        #    test_path = Path(dataset_path).parent / test_path
+        test_path = _resolve_split_path(str(test_path), dataset_path)
         if no_header:
             test_df = pd.read_csv(test_path, header=None)
         else:
             test_df = pd.read_csv(test_path)
         X_test_split, y_test_split = _split_target(test_df, target, no_header)
-        y_test, task_test, keep_mask = _infer_task_and_clean(y_test_split, missing_values)
+        y_test, keep_mask = _clean_target_only(y_test_split, missing_values)
         X_test_split = X_test_split.loc[keep_mask].reset_index(drop=True)
-        if task_test != task:
-            raise ValueError(f"Test split task '{task_test}' does not match train task '{task}'")
+    elif val_path and not test_path:
+        raise ValueError("has_val_split is set, but has_test_split is missing. Provide both or neither.")
     else:
         logger.info("No external test split; using internal train/val/test fractions.")
         X_train_split, X_holdout, y_train, y_temp = train_test_split(
