@@ -52,14 +52,14 @@ This document explains the design choices behind the MIMIC-derived datasets used
   - `prior_medication_event_count`,
   - `prior_procedure_event_count` from `procedures_icd.csv.gz`.
 
-## What “prior” means
+## What "prior" means
 - `prior_*` features are computed from **earlier admissions of the same subject only**.
 - For each admission row:
-  - value `1` in a `prior_*_top_*` feature means “this concept was seen in at least one earlier admission”,
-  - value `0` means “not seen previously”.
+  - value `1` in a `prior_*_top_*` feature means "this concept was seen in at least one earlier admission",
+  - value `0` means "not seen previously".
 - This is done to preserve admission-time validity and avoid same-stay future leakage.
 
-## What “top-K” means
+## What "top-K" means
 - For a one-to-many table (diagnoses or prescriptions):
   - count concept frequencies globally,
   - keep only the K most frequent concepts,
@@ -78,6 +78,14 @@ This document explains the design choices behind the MIMIC-derived datasets used
 - Current-admission event tables are not used directly as same-row one-hot indicators.
 - One-to-many event features are transformed to per-admission and then shifted to prior-history features.
 - For non-binary tasks, labels/time columns (for example `deathtime`, `dischtime`) are not included as input features.
+- Strict mode is now the default in the builder:
+  - only admissions with strictly earlier `admittime` contribute to `prior_*`,
+  - subject-disjoint train/val/test split artifacts are written by default.
+  - top-K diagnosis/medication concept sets are fitted on train split only by default.
+  - legacy behavior can be restored with:
+    - `--allow-same-time-prior`
+    - `--allow-subject-overlap-split`
+    - `--allow-global-topk`
 
 ## YAML schema choice
 - Generated YAML files explicitly list:
@@ -85,6 +93,10 @@ This document explains the design choices behind the MIMIC-derived datasets used
   - `categorical_columns`.
 - Dataloader now respects these lists when present, instead of fully inferring types.
 - This avoids re-treating binary history indicators as categoricals and re-one-hot expanding them.
+- Optional strict split generation writes train/val/test CSVs and stores:
+  - `has_val_split`
+  - `has_test_split`
+  in the YAML for explicit external split loading.
 
 ## Known caveats
 - `prior_expire_count` is expected to be very sparse in real data.
@@ -96,16 +108,19 @@ This document explains the design choices behind the MIMIC-derived datasets used
 - From repo root:
 
 ```bash
-python tabular_gia/data/build_mimic_iv_icu_mortality.py --tier tier1 --task binary
-python tabular_gia/data/build_mimic_iv_icu_mortality.py --tier tier2 --task binary
-python tabular_gia/data/build_mimic_iv_icu_mortality.py --tier tier3 --task binary
+python tabular_gia/data/build_mimic_iv_hospital_mortality.py --tier tier1 --task binary
+python tabular_gia/data/build_mimic_iv_hospital_mortality.py --tier tier2 --task binary
+python tabular_gia/data/build_mimic_iv_hospital_mortality.py --tier tier3 --task binary
 
-python tabular_gia/data/build_mimic_iv_icu_mortality.py --tier tier2 --task multiclass
-python tabular_gia/data/build_mimic_iv_icu_mortality.py --tier tier2 --task regression
+python tabular_gia/data/build_mimic_iv_hospital_mortality.py --tier tier2 --task multiclass
+python tabular_gia/data/build_mimic_iv_hospital_mortality.py --tier tier2 --task regression
+
+# Legacy opt-out example (not recommended)
+python tabular_gia/data/build_mimic_iv_hospital_mortality.py --tier tier3 --task binary --allow-same-time-prior --allow-subject-overlap-split --allow-global-topk
 ```
 
 - Quick smoke build:
 
 ```bash
-python tabular_gia/data/build_mimic_iv_icu_mortality.py --tier tier3 --task binary --max-rows 50000
+python tabular_gia/data/build_mimic_iv_hospital_mortality.py --tier tier3 --task binary --max-rows 50000
 ```

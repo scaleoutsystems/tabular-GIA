@@ -1,5 +1,5 @@
-dataset_path: data/binary/mimic_admission_tier1_binary/mimic_admission_tier1_binary.csv
-dataset_meta_path: data/binary/mimic_admission_tier1_binary/mimic_admission_tier1_binary.yaml
+dataset_path: data/binary/mimic_admission_tier3_binary/mimic_admission_tier3_binary.train.csv
+dataset_meta_path: data/binary/mimic_admission_tier3_binary/mimic_admission_tier3_binary.yaml
 
 #dataset_path: data/binary/adult/adult.csv
 #dataset_meta_path: data/binary/adult/adult.yaml
@@ -10,7 +10,7 @@ dataset_meta_path: data/binary/mimic_admission_tier1_binary/mimic_admission_tier
 #dataset_path: data/regression/california_housing/california_housing.csv
 #dataset_meta_path: data/regression/california_housing/california_housing.yaml
 
-# MIMIC-IV admission-time tiers (generated via tabular_gia/data/build_mimic_iv_icu_mortality.py)
+# MIMIC-IV admission-time tiers (generated via tabular_gia/data/build_mimic_iv_hospital_mortality.py)
 # Binary task:
 #dataset_path: data/binary/mimic_admission_tier2_binary/mimic_admission_tier2_binary.csv
 #dataset_meta_path: data/binary/mimic_admission_tier2_binary/mimic_admission_tier2_binary.yaml

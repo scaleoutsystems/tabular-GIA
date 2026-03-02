@@ -254,6 +254,16 @@ def _split_target(df: pd.DataFrame, target, no_header) -> tuple[pd.DataFrame, pd
     return X, y
 
 
+def _resolve_split_path(split_path: str, dataset_path: str) -> Path:
+    p = Path(split_path)
+    if p.is_absolute():
+        return p
+    candidate = Path(dataset_path).parent / p
+    if candidate.exists():
+        return candidate
+    return p
+
+
 def _infer_task_and_clean(
     y: pd.Series,
     missing_values,
@@ -279,6 +289,27 @@ def _infer_task_and_clean(
         return y_num, task, keep_mask
 
     return y_num, "regression", keep_mask
+
+
+def _clean_target_only(
+    y: pd.Series,
+    missing_values,
+) -> tuple[pd.Series, pd.Series]:
+    """Clean target values without inferring task type.
+
+    Useful for external val/test splits where train split already defines task.
+    """
+    if missing_values is not None:
+        y = y.replace(missing_values, pd.NA)
+
+    dtype_str = str(y.dtype)
+    if dtype_str == "object" or dtype_str.startswith("category"):
+        keep_mask = y.notna()
+        return y.loc[keep_mask].reset_index(drop=True), keep_mask
+
+    y_num = pd.to_numeric(y, errors="coerce")
+    keep_mask = y_num.notna()
+    return y_num.loc[keep_mask].reset_index(drop=True), keep_mask
 
 
 def _encode_target(y: pd.Series, task: str, target_classes: list | None) -> torch.Tensor:
@@ -425,18 +456,14 @@ def load_dataset(dataset_path: Path, dataset_meta_path: Path, num_clients: int, 
             random_state=seed,
             stratify=stratify_labels,
         )
-        test_path = Path(test_path)
-        #if not test_path.is_absolute():
-        #    test_path = Path(dataset_path).parent / test_path
+        test_path = _resolve_split_path(str(test_path), dataset_path)
         if no_header:
             test_df = pd.read_csv(test_path, header=None)
         else:
             test_df = pd.read_csv(test_path)
         X_test_split, y_test_split = _split_target(test_df, target, no_header)
-        y_test, task_test, keep_mask = _infer_task_and_clean(y_test_split, missing_values)
+        y_test, keep_mask = _clean_target_only(y_test_split, missing_values)
         X_test_split = X_test_split.loc[keep_mask].reset_index(drop=True)
-        if task_test != task:
-            raise ValueError(f"Test split task '{task_test}' does not match train task '{task}'")
     else:
         logger.info("No external test split; using internal train/val/test fractions.")
         X_train_split, X_holdout, y_train, y_temp = train_test_split(
