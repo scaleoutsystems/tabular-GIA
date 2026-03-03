@@ -15,8 +15,14 @@ from tabular_gia.fl.dataloader.tabular_dataloader import denormalize_numeric
 
 ATTACK_METRIC_FIELDS = (
     "tableak_acc",
-    "gain_tableak_over_prior",
+    "num_acc",
+    "cat_acc",
     "prior_tableak_acc",
+    "gain_tableak_over_prior",
+    "prior_num_acc",
+    "gain_num_over_prior",
+    "prior_cat_acc",
+    "gain_cat_over_prior",
     "emr",
     "emr_90",
     "emr_80",
@@ -24,15 +30,9 @@ ATTACK_METRIC_FIELDS = (
     "nn_mean",
     "nn_min",
     "dist_conf",
-    "num_acc",
-    "gain_num_over_prior",
-    "prior_num_acc",
     "num_dist_conf",
     "num_within_1std",
     "num_within_2std",
-    "cat_acc",
-    "gain_cat_over_prior",
-    "prior_cat_acc",
     "cat_dist_conf",
 )
 
@@ -43,17 +43,12 @@ ROUNDS_SUMMARY_CSV_FIELDS = (
     "exp_min",
     "exp_avg",
     "exp_max",
-    "client_exp",
     *ATTACK_METRIC_FIELDS,
 )
 
 RUN_SUMMARY_CSV_FIELDS = (
     "num_rounds",
     "total_rows",
-    "exp_min",
-    "exp_avg",
-    "exp_max",
-    "client_exp",
     *ATTACK_METRIC_FIELDS,
 )
 

@@ -36,20 +36,18 @@ def run_fedsgd(
     fl_metrics_fn=None,
 ):
     # 1. parse cfg and take out essentials like effective epochs, num_clients, lr
-    local_steps = max(1, int(cfg.get("local_steps", 1)))
-    local_epochs = max(1, int(cfg.get("local_epochs", 1)))
-    batch_size = cfg.get("batch_size")
+    local_steps = max(1, int(cfg["local_steps"]))
+    local_epochs = max(1, int(cfg["local_epochs"]))
+    batch_size = cfg["batch_size"]
     num_clients = len(client_dataloaders)
-    lr = cfg.get("lr")
+    lr = cfg["lr"]
     task = infer_task_from_criterion(criterion)
 
     # 1.1 derive round budget directly from min exposure target.
     client_n_eff = [int(len(dl) * int(getattr(dl, "batch_size", batch_size) or batch_size)) for dl in client_dataloaders]
     n_max_eff = max(client_n_eff) if client_n_eff else 1
     samples_per_client_per_round = max(1, local_steps * batch_size * local_epochs)
-    min_exposure = cfg.get("min_exposure")
-    if min_exposure is None:
-        raise ValueError("Missing required FL config field: min_exposure")
+    min_exposure = cfg["min_exposure"]
     min_exposure = float(min_exposure)
     if min_exposure <= 0:
         raise ValueError(f"min_exposure must be > 0, got {min_exposure}")

@@ -277,7 +277,7 @@ def _split_clients_dirichlet(
     )
 
 
-def load_dataset(dataset_path: str, dataset_meta_path: str, num_clients: int, **kwargs):
+def load_dataset(dataset_path: Path, dataset_meta_path: Path, num_clients: int, **kwargs):
     """Load and return dataloaders for a dataset. Kwargs are optional parameters to set dataloader speedups:
         num_workers,
         pin_memory,
@@ -289,7 +289,7 @@ def load_dataset(dataset_path: str, dataset_meta_path: str, num_clients: int, **
         meta = yaml.safe_load(f) or {}
 
     # 1.1 handle no_header if present
-    no_header = bool(meta.get("no_header", False))
+    no_header = bool(meta["no_header"])
     if no_header:
         # 2. load csv dataset to pandas dataframe
         df = pd.read_csv(dataset_path, header=None)
@@ -298,8 +298,8 @@ def load_dataset(dataset_path: str, dataset_meta_path: str, num_clients: int, **
     logger.info("Loaded data: rows=%d cols=%d no_header=%s", df.shape[0], df.shape[1], no_header)
 
     # 3 perform target split
-    target = meta.get("target")
-    missing_values = meta.get("missing_values")
+    target = meta["target"]
+    missing_values = meta["missing_values"]
     X_full, y_full = _split_target(df, target, no_header)
     logger.info("Target split: target=%s features=%d", target, X_full.shape[1])
 
@@ -314,13 +314,13 @@ def load_dataset(dataset_path: str, dataset_meta_path: str, num_clients: int, **
     logger.info("Task inferred: %s | dropped_missing_targets=%d", task, dropped)
 
     # 4. split into train, val, test at ratios 70 / 15 / 15, stratify on target
-    seed = kwargs.get("seed", 42)
-    train_frac = kwargs.get("train_frac", 0.70)
-    val_frac = kwargs.get("val_frac", 0.15)
-    test_frac = kwargs.get("test_frac", 0.15)
+    seed = kwargs["seed"]
+    train_frac = kwargs["train_frac"]
+    val_frac = kwargs["val_frac"]
+    test_frac = kwargs["test_frac"]
     stratify_labels = y if task in ("binary", "multiclass") else None
 
-    test_path = meta.get("has_test_split")
+    test_path = meta["has_test_split"]
     if test_path:
         logger.info("External test split provided: %s", test_path)
         val_ratio = val_frac / max(1e-8, (train_frac + val_frac))
@@ -410,7 +410,7 @@ def load_dataset(dataset_path: str, dataset_meta_path: str, num_clients: int, **
     y_train = y_train.reset_index(drop=True)
 
     # 4.3 split train amongst num_clients
-    partition_strategy = str(kwargs.get("partition_strategy", "iid")).strip().lower()
+    partition_strategy = str(kwargs["partition_strategy"]).strip().lower()
     if partition_strategy == "iid":
         client_splits = _split_clients_iid(X_train, y_train, num_clients, task, seed)
     elif partition_strategy == "dirichlet":
@@ -421,9 +421,9 @@ def load_dataset(dataset_path: str, dataset_meta_path: str, num_clients: int, **
             )
             client_splits = _split_clients_iid(X_train, y_train, num_clients, task, seed)
         else:
-            dirichlet_alpha = float(kwargs.get("dirichlet_alpha", 0.3))
-            min_client_samples = int(kwargs.get("min_client_samples", 1))
-            max_attempts = int(kwargs.get("dirichlet_max_attempts", 50))
+            dirichlet_alpha = float(kwargs["dirichlet_alpha"])
+            min_client_samples = int(kwargs["min_client_samples"])
+            max_attempts = int(kwargs["dirichlet_max_attempts"])
             client_splits = _split_clients_dirichlet(
                 X_train,
                 y_train,
@@ -442,10 +442,10 @@ def load_dataset(dataset_path: str, dataset_meta_path: str, num_clients: int, **
     )
 
     # 5. create dataloaders
-    batch_size = kwargs.get("batch_size", 64)
-    num_workers = int(kwargs.get("num_workers", 0))
-    pin_memory = bool(kwargs.get("pin_memory", False))
-    persistent_workers = bool(kwargs.get("persistent_workers", num_workers > 0))
+    batch_size = kwargs["batch_size"]
+    num_workers = int(kwargs["num_workers"])
+    pin_memory = bool(kwargs["pin_memory"])
+    persistent_workers = bool(kwargs["persistent_workers"])
     generator = torch.Generator()
     generator.manual_seed(seed)
 
@@ -571,4 +571,8 @@ def load_dataset(dataset_path: str, dataset_meta_path: str, num_clients: int, **
     return client_dataloaders, val_loader, test_loader, feature_schema
 
 if __name__ == "__main__":
-    client_dataloaders, val_loader, test_loader, feature_schema = load_dataset("/home/edgelab/ivo/tabular-GIA/tabular_gia/data/binary/adult/adult.csv", "/home/edgelab/ivo/tabular-GIA/tabular_gia/data/binary/adult/adult.yaml", 10)
+    client_dataloaders, val_loader, test_loader, feature_schema = load_dataset(
+        Path("data/binary/adult/adult.csv"),
+        Path("data/binary/adult/adult.yaml"),
+        10,
+    )

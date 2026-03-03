@@ -35,8 +35,10 @@ def _run_single(
 ) -> None:
     logger.info("Loading gia config: base=%s", gia_cfg_path)
     gia_cfg_root = read_yaml(gia_cfg_path)
-    gia_cfg = gia_cfg_root.get(protocol)
-    if gia_cfg is None or gia_cfg.get("invertingconfig") is None:
+    if protocol not in gia_cfg_root:
+        raise ValueError(f"Missing GIA protocol config: '{protocol}'.")
+    gia_cfg = gia_cfg_root[protocol]
+    if "invertingconfig" not in gia_cfg:
         raise ValueError(f"Missing GIA config at '{protocol}.invertingconfig'.")
 
     run_id = f"experiment_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
@@ -112,10 +114,8 @@ def main(
 ) -> None:
     logger.info("Loading base config: base=%s", base_cfg_path)
     base_cfg = read_yaml(base_cfg_path)
-    protocol = base_cfg.get("protocol")
-    if not protocol:
-        raise ValueError("Missing 'protocol' in base config.")
-    seed = base_cfg.get("seed")
+    protocol = base_cfg["protocol"]
+    seed = base_cfg["seed"]
 
     seed_everything(seed)
     torch.backends.cudnn.benchmark = False
@@ -123,6 +123,11 @@ def main(
 
     logger.info("Loading dataset config: base=%s", dataset_cfg_path)
     dataset_cfg = read_yaml(dataset_cfg_path)
+    for path_key in ("dataset_path", "dataset_meta_path"):
+        raw_path = Path(dataset_cfg[path_key])
+        if not raw_path.is_absolute():
+            raw_path = cfg_dir.parent / raw_path
+        dataset_cfg[path_key] = raw_path
     dataset_cfg["seed"] = seed
 
     logger.info("Loading model config: base=%s", model_cfg_path)
@@ -131,7 +136,7 @@ def main(
     fl_cfg_path = base_cfg_path.parent / "fl" / f"{protocol}.yaml"
     logger.info("Loading fl config: base=%s", fl_cfg_path)
     fl_cfg = read_yaml(fl_cfg_path)
-    fl_cfg["batch_size"] = dataset_cfg.get("batch_size")
+    fl_cfg["batch_size"] = dataset_cfg["batch_size"]
 
     if experiment_name is None:
         _run_single(

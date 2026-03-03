@@ -2,7 +2,6 @@
 base:
   protocol: [fedsgd, fedavg]
   seed: [42] # add more seeds (e.g. [42, 1337, 2026]) for multi-seed repeats
-  attack_schedule: [pow2] # options: pow2 | all (pow2 is cheaper)
 
 # dataset
 dataset:

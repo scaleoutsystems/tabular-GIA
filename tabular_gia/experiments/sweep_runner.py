@@ -71,7 +71,10 @@ def _resolve_dataset_cfg(dataset_cfg: dict[str, Any], dataset_override: dict[str
             dataset_cfg_run[dataset_key] = value
 
     for path_key in ("dataset_path", "dataset_meta_path"):
-        dataset_cfg_run[path_key] = str(config_dir.parent / dataset_cfg_run[path_key])
+        raw_path = Path(dataset_cfg_run[path_key])
+        if not raw_path.is_absolute():
+            raw_path = config_dir.parent / raw_path
+        dataset_cfg_run[path_key] = raw_path
     return dataset_cfg_run
 
 
@@ -83,11 +86,10 @@ def _resolve_model_cfg(
 ) -> dict[str, Any]:
     if use_model_presets:
         preset_name = model_override["name"]
-        presets = model_cfg.get("presets", {})
-        preset_cfg = presets.get(preset_name)
-        if preset_cfg is None:
+        presets = model_cfg["presets"]
+        if preset_name not in presets:
             raise ValueError(f"Preset '{preset_name}' not found in model config.")
-        return deepcopy(preset_cfg)
+        return deepcopy(presets[preset_name])
     return deepcopy(model_override)
 
 
@@ -97,12 +99,12 @@ def _resolve_gia_cfg(
     gia_cfg_root: dict[str, Any],
     gia_override: dict[str, Any],
 ) -> dict[str, Any]:
-    protocol_cfg = deepcopy(gia_cfg_root.get(protocol, {}))
-    invertingconfig = protocol_cfg.get("invertingconfig")
-    if invertingconfig is None:
-        if not gia_override:
-            raise ValueError(f"Missing GIA config at '{protocol}.invertingconfig'.")
-        invertingconfig = {}
+    if protocol not in gia_cfg_root:
+        raise ValueError(f"Missing GIA protocol config: '{protocol}'.")
+    protocol_cfg = deepcopy(gia_cfg_root[protocol])
+    if "invertingconfig" not in protocol_cfg:
+        raise ValueError(f"Missing GIA config at '{protocol}.invertingconfig'.")
+    invertingconfig = protocol_cfg["invertingconfig"]
 
     if gia_override:
         invertingconfig.update(gia_override)

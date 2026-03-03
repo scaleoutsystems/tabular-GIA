@@ -1,5 +1,7 @@
 target: income
+no_header: false
 missing_values: "?"
+has_test_split: null
 numerical_columns:
   - age
   - fnlwgt
