@@ -25,6 +25,8 @@ from leakpro.fl_utils.gia_train import train, train_nostep
 from leakpro.utils.seed import restore_rng_state
 from metrics.tabular_metrics import (
     ATTACK_METRIC_FIELDS,
+    ROUNDS_SUMMARY_CSV_FIELDS,
+    RUN_SUMMARY_CSV_FIELDS,
     compute_reconstruction_metrics,
     prepare_tensors_for_metrics,
     summarize_round,
@@ -85,7 +87,7 @@ ATTACKS_CSV_FIELDS = (
     "exp_avg",
     "exp_max",
     "client_exp",
-    "num_rows",
+    "row_count",
     # shared metric fields
     *ATTACK_METRIC_FIELDS,
     # "artifact_path",
@@ -99,15 +101,6 @@ FL_CSV_FIELDS = (
     "exp_max",
     *(f"{split}_{metric}" for split in ("train", "val", "test") for metric in FL_METRIC_FIELDS),
 )
-
-ROUND_SUMMARY_ALLOW_FIELDS = (
-    "exp_min",
-    "exp_avg",
-    "exp_max",
-    "client_exp",
-    *ATTACK_METRIC_FIELDS,
-)
-
 
 class MetricsCsvWriter:
     def __init__(self, results_dir: Path) -> None:
@@ -147,7 +140,7 @@ class SummaryCollector:
         if not metrics_list:
             return
         metric_rows = [
-            {"num_rows": row["num_rows"], **{k: row[k] for k in ROUND_SUMMARY_ALLOW_FIELDS if k in row}}
+            {"row_count": row["row_count"], **{k: row[k] for k in ROUNDS_SUMMARY_CSV_FIELDS if k in row}}
             for row in metrics_list
         ]
         round_summary = summarize_round(metric_rows, round_idx)
@@ -158,6 +151,7 @@ class SummaryCollector:
         write_rounds_summary(self.results_dir, self.round_summaries)
         run_summary = summarize_run(self.round_summaries)
         if run_summary is not None:
+            run_summary = {field: run_summary[field] for field in RUN_SUMMARY_CSV_FIELDS if field in run_summary}
             write_run_summary(self.results_dir, run_summary)
         return run_summary
 

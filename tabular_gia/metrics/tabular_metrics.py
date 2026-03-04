@@ -174,7 +174,7 @@ def compute_reconstruction_metrics(
         "nn_mean": float(np.mean(nn_dist)),
         "nn_median": float(np.median(nn_dist)),
         "nn_min": float(np.min(nn_dist)),
-        "num_rows": int(orig_tensor.shape[0]),
+        "row_count": int(orig_tensor.shape[0]),
         "prior_tableak_acc": prior_metrics["prior_tableak_acc"],
         "gain_tableak_over_prior": float(np.nanmean(tableak_acc)) - prior_metrics["prior_tableak_acc"],
         "dist_conf": distribution_metrics["dist_conf"],
@@ -365,10 +365,10 @@ def summarize_round(
     if not metrics_list:
         return None
 
-    rows = np.array([m["num_rows"] for m in metrics_list], dtype=float)
+    rows = np.array([m["row_count"] for m in metrics_list], dtype=float)
     total_rows = float(rows.sum()) if rows.size else 0.0
     weights = rows / total_rows if total_rows > 0 else np.zeros_like(rows)
-    metric_means = _weighted_metric_means(metrics_list, weights, {"client_idx", "num_rows"})
+    metric_means = _weighted_metric_means(metrics_list, weights, {"client_idx", "row_count"})
 
     return {
         "round": int(round_idx),
