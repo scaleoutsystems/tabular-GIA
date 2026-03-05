@@ -15,8 +15,14 @@ from tabular_gia.fl.dataloader.tabular_dataloader import denormalize_numeric
 
 ATTACK_METRIC_FIELDS = (
     "tableak_acc",
-    "gain_tableak_over_prior",
+    "num_acc",
+    "cat_acc",
     "prior_tableak_acc",
+    "gain_tableak_over_prior",
+    "prior_num_acc",
+    "gain_num_over_prior",
+    "prior_cat_acc",
+    "gain_cat_over_prior",
     "emr",
     "emr_90",
     "emr_80",
@@ -24,15 +30,9 @@ ATTACK_METRIC_FIELDS = (
     "nn_mean",
     "nn_min",
     "dist_conf",
-    "num_acc",
-    "gain_num_over_prior",
-    "prior_num_acc",
     "num_dist_conf",
     "num_within_1std",
     "num_within_2std",
-    "cat_acc",
-    "gain_cat_over_prior",
-    "prior_cat_acc",
     "cat_dist_conf",
 )
 
@@ -43,17 +43,12 @@ ROUNDS_SUMMARY_CSV_FIELDS = (
     "exp_min",
     "exp_avg",
     "exp_max",
-    "client_exp",
     *ATTACK_METRIC_FIELDS,
 )
 
 RUN_SUMMARY_CSV_FIELDS = (
     "num_rounds",
     "total_rows",
-    "exp_min",
-    "exp_avg",
-    "exp_max",
-    "client_exp",
     *ATTACK_METRIC_FIELDS,
 )
 
@@ -179,7 +174,7 @@ def compute_reconstruction_metrics(
         "nn_mean": float(np.mean(nn_dist)),
         "nn_median": float(np.median(nn_dist)),
         "nn_min": float(np.min(nn_dist)),
-        "num_rows": int(orig_tensor.shape[0]),
+        "row_count": int(orig_tensor.shape[0]),
         "prior_tableak_acc": prior_metrics["prior_tableak_acc"],
         "gain_tableak_over_prior": float(np.nanmean(tableak_acc)) - prior_metrics["prior_tableak_acc"],
         "dist_conf": distribution_metrics["dist_conf"],
@@ -370,10 +365,10 @@ def summarize_round(
     if not metrics_list:
         return None
 
-    rows = np.array([m["num_rows"] for m in metrics_list], dtype=float)
+    rows = np.array([m["row_count"] for m in metrics_list], dtype=float)
     total_rows = float(rows.sum()) if rows.size else 0.0
     weights = rows / total_rows if total_rows > 0 else np.zeros_like(rows)
-    metric_means = _weighted_metric_means(metrics_list, weights, {"client_idx", "num_rows"})
+    metric_means = _weighted_metric_means(metrics_list, weights, {"client_idx", "row_count"})
 
     return {
         "round": int(round_idx),

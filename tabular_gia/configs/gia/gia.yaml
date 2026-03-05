@@ -4,7 +4,7 @@ fedsgd:
   # - round_checkpoint: attack real updates produced in training rounds
   # - fixed_batch: attack fixed sample-ID batches repeatedly at checkpoints
   fixed_batch_k: 1 # used when attack_mode=fixed_batch (fixed replay batches per client)
-  attack_schedule: exposure
+  attack_schedule: pow2
   # attack_schedule options:
   # - all: attack every communication round
   # - pow2: attack rounds 1,2,4,8,...
@@ -19,7 +19,7 @@ fedsgd:
   invertingconfig:
     label_known: true
     attack_lr: 0.03
-    at_iterations: 500
+    at_iterations: 10000
     data_extension: GiaTabularExtension
 
 fedavg:
@@ -41,5 +41,5 @@ fedavg:
   invertingconfig:
     label_known: true
     attack_lr: 0.03
-    at_iterations: 1000
+    at_iterations: 10000
     data_extension: GiaTabularExtension

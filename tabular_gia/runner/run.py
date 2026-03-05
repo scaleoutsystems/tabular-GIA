@@ -25,6 +25,8 @@ from leakpro.fl_utils.gia_train import train, train_nostep
 from leakpro.utils.seed import restore_rng_state
 from metrics.tabular_metrics import (
     ATTACK_METRIC_FIELDS,
+    ROUNDS_SUMMARY_CSV_FIELDS,
+    RUN_SUMMARY_CSV_FIELDS,
     compute_reconstruction_metrics,
     prepare_tensors_for_metrics,
     summarize_round,
@@ -85,7 +87,7 @@ ATTACKS_CSV_FIELDS = (
     "exp_avg",
     "exp_max",
     "client_exp",
-    "num_rows",
+    "row_count",
     # shared metric fields
     *ATTACK_METRIC_FIELDS,
     # "artifact_path",
@@ -99,15 +101,6 @@ FL_CSV_FIELDS = (
     "exp_max",
     *(f"{split}_{metric}" for split in ("train", "val", "test") for metric in FL_METRIC_FIELDS),
 )
-
-ROUND_SUMMARY_ALLOW_FIELDS = (
-    "exp_min",
-    "exp_avg",
-    "exp_max",
-    "client_exp",
-    *ATTACK_METRIC_FIELDS,
-)
-
 
 class MetricsCsvWriter:
     def __init__(self, results_dir: Path) -> None:
@@ -147,7 +140,7 @@ class SummaryCollector:
         if not metrics_list:
             return
         metric_rows = [
-            {"num_rows": row["num_rows"], **{k: row[k] for k in ROUND_SUMMARY_ALLOW_FIELDS if k in row}}
+            {"row_count": row["row_count"], **{k: row[k] for k in ROUNDS_SUMMARY_CSV_FIELDS if k in row}}
             for row in metrics_list
         ]
         round_summary = summarize_round(metric_rows, round_idx)
@@ -158,6 +151,7 @@ class SummaryCollector:
         write_rounds_summary(self.results_dir, self.round_summaries)
         run_summary = summarize_run(self.round_summaries)
         if run_summary is not None:
+            run_summary = {field: run_summary[field] for field in RUN_SUMMARY_CSV_FIELDS if field in run_summary}
             write_run_summary(self.results_dir, run_summary)
         return run_summary
 
@@ -177,14 +171,14 @@ class AttackScheduler:
         self.dataset_cfg = dataset_cfg
         self.client_dataloaders = client_dataloaders
 
-        self.attack_mode = str(gia_cfg.get("attack_mode", "round_checkpoint")).strip().lower()
-        self.attack_schedule = str(gia_cfg.get("attack_schedule", "all")).strip().lower()
-        self.fixed_batch_k = int(gia_cfg.get("fixed_batch_k", 1))
+        self.attack_mode = str(gia_cfg["attack_mode"]).strip().lower()
+        self.attack_schedule = str(gia_cfg["attack_schedule"]).strip().lower()
+        self.fixed_batch_k = int(gia_cfg["fixed_batch_k"])
 
         self.exposure_include_round1_preagg = False
         self.exposure_targets: list[float] = []
         if self.attack_schedule == "exposure":
-            raw = gia_cfg.get("attack_exposure_milestones", [0.5, 1.0, 2.0, 5.0, 10.0])
+            raw = gia_cfg["attack_exposure_milestones"]
             self.exposure_include_round1_preagg = any(float(m) == 0.0 for m in raw)
             self.exposure_targets = sorted(
                 {
@@ -213,10 +207,10 @@ class AttackScheduler:
                 r <<= 1
             return rounds
         if self.attack_schedule == "fixed":
-            raw = self.gia_cfg.get("attack_rounds", [])
+            raw = self.gia_cfg["attack_rounds"]
             return {int(r) for r in raw if 1 <= int(r) <= total_rounds}
         if self.attack_schedule in {"log", "logspace"}:
-            count = int(self.gia_cfg.get("attack_num_checkpoints", 8))
+            count = int(self.gia_cfg["attack_num_checkpoints"])
             if count == 1:
                 return {total_rounds}
             rounds = {
@@ -282,10 +276,10 @@ class AttackScheduler:
         return DataLoader(fixed_batch_ds, batch_size=int(client_loader.batch_size), shuffle=False)
 
     def _build_fixed_batch_loaders(self) -> None:
-        local_steps_raw = self.fl_cfg.get("local_steps", 1)
+        local_steps_raw = self.fl_cfg["local_steps"]
         local_steps_all = isinstance(local_steps_raw, str) and local_steps_raw.strip().lower() == "all"
         local_steps = None if local_steps_all else max(1, int(local_steps_raw))
-        base_seed = int(self.dataset_cfg.get("seed", 42))
+        base_seed = int(self.dataset_cfg["seed"])
 
         for client_idx, client_loader in enumerate(self.client_dataloaders):
             batch_size = int(client_loader.batch_size)
@@ -325,6 +319,8 @@ class AttackRunner:
         self.attack_cfg_base = attack_cfg_base
         self.feature_schema = feature_schema
         self.results_dir = results_dir
+        self.debug_dir = results_dir / "debug"
+        self.debug_dir.mkdir(parents=True, exist_ok=True)
         self.csv_sink = csv_sink
         self.attack_mode = attack_mode
         self.attack_id_counter = 0
@@ -390,7 +386,7 @@ class AttackRunner:
                 bar.update(total_iters - (last_i + 1))
 
         artifact_name = f"attack_{attack_id:06d}_round_{int(round_idx):06d}_client_{int(client_idx):03d}.txt"
-        results_path = self.results_dir / artifact_name
+        results_path = self.debug_dir / artifact_name
 
         orig_tensor, recon_tensor, label_tensor = prepare_tensors_for_metrics(attacker, self.feature_schema, client_idx)
         reconstruction_metrics = compute_reconstruction_metrics(
@@ -400,7 +396,7 @@ class AttackRunner:
             client_idx,
         )
         write_debug_reconstruction_txt(
-            str(results_path),
+            results_path,
             orig_tensor,
             recon_tensor,
             reconstruction_metrics["per_row_metrics"],
@@ -463,9 +459,13 @@ class RunEngine:
             out_dim = 1
 
         model_cfg = deepcopy(self.spec.model_cfg)
-        preset_name = model_cfg.get("use_preset")
-        if preset_name is not None:
-            model_cfg = model_cfg["presets"][preset_name]
+        if "use_preset" in model_cfg:
+            preset_name = model_cfg["use_preset"]
+            if preset_name is not None:
+                presets = model_cfg["presets"]
+                if preset_name not in presets:
+                    raise ValueError(f"Model preset '{preset_name}' not found in model config.")
+                model_cfg = presets[preset_name]
 
         model = TabularMLP(
             d_in=feature_schema["num_features"],
@@ -491,7 +491,7 @@ class RunEngine:
 
     def _build_attack_cfg(self, criterion: torch.nn.Module, fl_cfg: dict) -> InvertingConfig:
         lr = float(fl_cfg["lr"])
-        optimizer_name = fl_cfg.get("optimizer")
+        optimizer_name = fl_cfg["optimizer"]
         optimizer = MetaAdam(lr=lr) if optimizer_name == "MetaAdam" else MetaSGD(lr=lr)
 
         invertingconfig = dict(self.spec.gia_cfg["invertingconfig"])

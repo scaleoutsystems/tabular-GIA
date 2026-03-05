@@ -6,7 +6,7 @@
 #dropout: [0.0, 0.15, 0.3]
 #activation: [relu, gelu, silu]
 
-use_preset: small
+use_preset: large
 
 presets:
   small:  {d_hidden: 64,  num_layers: 2, norm: layernorm, dropout: 0.0, activation: gelu}
