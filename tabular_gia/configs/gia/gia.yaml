@@ -4,7 +4,7 @@ fedsgd:
   # - round_checkpoint: attack real updates produced in training rounds
   # - fixed_batch: attack fixed sample-ID batches repeatedly at checkpoints
   fixed_batch_k: 1 # used when attack_mode=fixed_batch (fixed replay batches per client)
-  attack_schedule: pow2
+  attack_schedule: exposure
   # attack_schedule options:
   # - all: attack every communication round
   # - pow2: attack rounds 1,2,4,8,...
@@ -15,7 +15,7 @@ fedsgd:
   # attack_num_checkpoints: 8
   # attack_exposure_milestones are absolute exposure points (not fractions of min_exposure).
   # 0.0 triggers round-1 pre-aggregation attacks.
-  attack_exposure_milestones: [0.0, 0.25, 0.5, 0.75, 1.0, 2.0, 5.0, 10.0]
+  attack_exposure_milestones: [0.0, 0.5, 1.0, 2.0, 5.0, 10.0]
   invertingconfig:
     label_known: true
     attack_lr: 0.03
@@ -28,7 +28,7 @@ fedavg:
   # - round_checkpoint: attack real updates produced in training rounds
   # - fixed_batch: attack fixed sample-ID batch sequences repeatedly at checkpoints
   fixed_batch_k: 1 # used when attack_mode=fixed_batch (fixed replay sequences per client)
-  attack_schedule: pow2
+  attack_schedule: exposure
   # attack_schedule options:
   # - all: attack every communication round
   # - pow2: attack rounds 1,2,4,8,...
@@ -37,7 +37,7 @@ fedavg:
   # - exposure: attack rounds from attack_exposure_milestones
   # attack_rounds: [1, 10, 50]
   # attack_num_checkpoints: 8
-  # attack_exposure_milestones: [0.0, 0.5, 1.0, 2.0, 5.5, 10.0]
+  attack_exposure_milestones: [0.0, 0.5, 1.0, 2.0, 5.0, 10.0]
   invertingconfig:
     label_known: true
     attack_lr: 0.03

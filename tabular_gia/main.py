@@ -13,7 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from experiments.registry import EXPERIMENT_RUNNERS
 from helper.helpers import read_yaml, write_json
 from leakpro.utils.seed import seed_everything
-from tabular_gia.runner.run import RunEngine, RunSpec
+from tabular_gia.runner.run import RunConfig, RunEngine, build_runtime
 
 
 logger = logging.getLogger(__name__)
@@ -56,7 +56,7 @@ def _run_single(
         },
     )
 
-    spec = RunSpec(
+    run_config = RunConfig(
         protocol=protocol,
         dataset_cfg=dataset_cfg,
         model_cfg=model_cfg,
@@ -65,15 +65,13 @@ def _run_single(
         results_dir=artifacts_dir,
         fl_only=fl_only,
     )
-    RunEngine(spec).run()
+    runtime = build_runtime(run_config)
+    RunEngine(run_config, runtime).run()
 
 
 def _run_experiment(
     *,
     experiment_name: str,
-    base_cfg: dict,
-    dataset_cfg: dict,
-    model_cfg: dict,
     cfg_dir: Path,
     results_dir: Path,
     fl_only: bool,
@@ -92,9 +90,6 @@ def _run_experiment(
     runner_cls = EXPERIMENT_RUNNERS[experiment_name]
     runner = runner_cls(
         sweep_cfg=sweep_cfg,
-        base_cfg=base_cfg,
-        dataset_cfg=dataset_cfg,
-        model_cfg=model_cfg,
         config_dir=cfg_dir,
         results_dir=results_dir / "experiments",
         fl_only=fl_only,
@@ -112,33 +107,34 @@ def main(
     experiment_name: str | None = None,
     fl_only: bool = False,
 ) -> None:
-    logger.info("Loading base config: base=%s", base_cfg_path)
-    base_cfg = read_yaml(base_cfg_path)
-    protocol = base_cfg["protocol"]
-    seed = base_cfg["seed"]
-
-    seed_everything(seed)
-    torch.backends.cudnn.benchmark = False
-    torch.set_float32_matmul_precision("high")
-
-    logger.info("Loading dataset config: base=%s", dataset_cfg_path)
-    dataset_cfg = read_yaml(dataset_cfg_path)
-    for path_key in ("dataset_path", "dataset_meta_path"):
-        raw_path = Path(dataset_cfg[path_key])
-        if not raw_path.is_absolute():
-            raw_path = cfg_dir.parent / raw_path
-        dataset_cfg[path_key] = raw_path
-    dataset_cfg["seed"] = seed
-
-    logger.info("Loading model config: base=%s", model_cfg_path)
-    model_cfg = read_yaml(model_cfg_path)
-
-    fl_cfg_path = base_cfg_path.parent / "fl" / f"{protocol}.yaml"
-    logger.info("Loading fl config: base=%s", fl_cfg_path)
-    fl_cfg = read_yaml(fl_cfg_path)
-    fl_cfg["batch_size"] = dataset_cfg["batch_size"]
-
     if experiment_name is None:
+        logger.info("Loading base config: base=%s", base_cfg_path)
+        base_cfg = read_yaml(base_cfg_path)
+        protocol = base_cfg["protocol"]
+        seed = base_cfg["seed"]
+
+        seed_everything(seed)
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cudnn.benchmark = False
+        torch.set_float32_matmul_precision("high")
+
+        logger.info("Loading dataset config: base=%s", dataset_cfg_path)
+        dataset_cfg = read_yaml(dataset_cfg_path)
+        for path_key in ("dataset_path", "dataset_meta_path"):
+            raw_path = Path(dataset_cfg[path_key])
+            if not raw_path.is_absolute():
+                raw_path = cfg_dir.parent / raw_path
+            dataset_cfg[path_key] = raw_path
+        dataset_cfg["seed"] = seed
+
+        logger.info("Loading model config: base=%s", model_cfg_path)
+        model_cfg = read_yaml(model_cfg_path)
+
+        fl_cfg_path = base_cfg_path.parent / "fl" / f"{protocol}.yaml"
+        logger.info("Loading fl config: base=%s", fl_cfg_path)
+        fl_cfg = read_yaml(fl_cfg_path)
+        fl_cfg["batch_size"] = dataset_cfg["batch_size"]
+
         _run_single(
             protocol=protocol,
             base_cfg=base_cfg,
@@ -153,9 +149,6 @@ def main(
 
     _run_experiment(
         experiment_name=experiment_name,
-        base_cfg=base_cfg,
-        dataset_cfg=dataset_cfg,
-        model_cfg=model_cfg,
         cfg_dir=cfg_dir,
         results_dir=results_dir,
         fl_only=fl_only,

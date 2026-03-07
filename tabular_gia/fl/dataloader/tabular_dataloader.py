@@ -92,6 +92,22 @@ def _fit_encoders(
     return {
         "cat_dummy_cols": cat_dummy_cols,
         "cat_categories": cat_categories,
+        "cat_cardinalities": [len(cat_categories[c]) for c in cat_cols],
+    }
+
+
+def _fit_ordinal_encoders(
+    X_train: pd.DataFrame,
+    cat_cols: list[str],
+) -> dict:
+    cat_categories = {
+        c: pd.Categorical(X_train[c].astype(object), ordered=False).categories.tolist() + ["__UNK__"]
+        for c in cat_cols
+    }
+    cat_cardinalities = [len(cat_categories[c]) for c in cat_cols]
+    return {
+        "cat_categories": cat_categories,
+        "cat_cardinalities": cat_cardinalities,
     }
 
 
@@ -105,6 +121,29 @@ def _apply_encoders(
     if cat_cols:
         X_cat = X[cat_cols].astype(object)
         X_cat = pd.get_dummies(X_cat, drop_first=False).reindex(columns=meta["cat_dummy_cols"], fill_value=0)
+    else:
+        X_cat = pd.DataFrame(index=X.index)
+    if len(X_num.columns) and len(X_cat.columns):
+        return pd.concat([X_num, X_cat], axis=1)
+    return X_num if len(X_num.columns) else X_cat
+
+
+def _apply_ordinal_encoders(
+    X: pd.DataFrame,
+    meta: dict,
+    num_cols: list[str],
+    cat_cols: list[str],
+) -> pd.DataFrame:
+    X_num = X[num_cols].apply(pd.to_numeric, errors="coerce").fillna(0) if num_cols else pd.DataFrame(index=X.index)
+    if cat_cols:
+        X_cat_cols: list[pd.Series] = []
+        for col in cat_cols:
+            categories = meta["cat_categories"][col]
+            known_categories = categories[:-1]
+            x_col = X[col].astype(object).where(lambda s: s.isin(known_categories), "__UNK__")
+            codes = pd.Categorical(x_col, categories=categories, ordered=False).codes
+            X_cat_cols.append(pd.Series(codes.astype(np.int64), name=col, index=X.index))
+        X_cat = pd.concat(X_cat_cols, axis=1) if X_cat_cols else pd.DataFrame(index=X.index)
     else:
         X_cat = pd.DataFrame(index=X.index)
     if len(X_num.columns) and len(X_cat.columns):
@@ -393,10 +432,20 @@ def load_dataset(dataset_path: Path, dataset_meta_path: Path, num_clients: int, 
     logger.info("Target classes (train-derived): %s", target_classes if target_classes is not None else "regression")
 
     # 4.3 fit/apply encoders (one-hot) using train only
-    encoder_meta = _fit_encoders(X_train_split, num_cols, cat_cols, missing_values)
-    X_train      = _apply_encoders(X_train_split, encoder_meta, num_cols, cat_cols)
-    X_val        = _apply_encoders(X_val_split, encoder_meta, num_cols, cat_cols)
-    X_test       = _apply_encoders(X_test_split, encoder_meta, num_cols, cat_cols)
+    encoding_mode = str(kwargs["encoding_mode"]).strip().lower()
+    if encoding_mode == "onehot":
+        encoder_meta = _fit_encoders(X_train_split, num_cols, cat_cols, missing_values)
+        X_train = _apply_encoders(X_train_split, encoder_meta, num_cols, cat_cols)
+        X_val = _apply_encoders(X_val_split, encoder_meta, num_cols, cat_cols)
+        X_test = _apply_encoders(X_test_split, encoder_meta, num_cols, cat_cols)
+    elif encoding_mode == "ordinal":
+        encoder_meta = _fit_ordinal_encoders(X_train_split, cat_cols)
+        encoder_meta["cat_dummy_cols"] = []
+        X_train = _apply_ordinal_encoders(X_train_split, encoder_meta, num_cols, cat_cols)
+        X_val = _apply_ordinal_encoders(X_val_split, encoder_meta, num_cols, cat_cols)
+        X_test = _apply_ordinal_encoders(X_test_split, encoder_meta, num_cols, cat_cols)
+    else:
+        raise ValueError(f"Unknown encoding_mode '{encoding_mode}'. Use 'onehot' or 'ordinal'.")
     feature_columns = X_train.columns.tolist()
 
     # global train stats for val/test normalization
@@ -459,18 +508,9 @@ def load_dataset(dataset_path: Path, dataset_meta_path: Path, num_clients: int, 
     y_val_t = _encode_target(y_val, task, target_classes)
     y_test_t = _encode_target(y_test, task, target_classes)
 
-    _train_ds = TensorDataset(
-        torch.tensor(X_train.to_numpy(dtype=np.float32, copy=False), dtype=torch.float32),
-        y_train_t,
-    )
-    val_ds = TensorDataset(
-        torch.tensor(X_val.to_numpy(dtype=np.float32, copy=False), dtype=torch.float32),
-        y_val_t,
-    )
-    test_ds = TensorDataset(
-        torch.tensor(X_test.to_numpy(dtype=np.float32, copy=False), dtype=torch.float32),
-        y_test_t,
-    )
+    _train_ds = TensorDataset(torch.tensor(X_train.to_numpy(dtype=np.float32, copy=False), dtype=torch.float32), y_train_t)
+    val_ds = TensorDataset(torch.tensor(X_val.to_numpy(dtype=np.float32, copy=False), dtype=torch.float32), y_val_t)
+    test_ds = TensorDataset(torch.tensor(X_test.to_numpy(dtype=np.float32, copy=False), dtype=torch.float32), y_test_t)
 
     client_dataloaders = []
     client_num_means = []
@@ -489,29 +529,40 @@ def load_dataset(dataset_path: Path, dataset_meta_path: Path, num_clients: int, 
 
         # Client-side categorical marginals are useful for prior baseline metrics.
         cat_probs_for_client: dict[str, list[float]] = {}
-        current_idx = len(num_cols)
-        for col in cat_cols:
-            cats = encoder_meta["cat_categories"].get(col, [])
-            if isinstance(cats, dict):
-                cats = cats.get("categories", [])
-            n_cats = len(cats)
-            if n_cats <= 0 or current_idx + n_cats > X_client.shape[1]:
-                continue
-            probs = X_client.iloc[:, current_idx : current_idx + n_cats].mean(axis=0).to_numpy(dtype=np.float32)
-            total = float(np.sum(probs))
-            if total > 0:
-                probs = probs / total
-            else:
-                probs = np.full(n_cats, 1.0 / n_cats, dtype=np.float32)
-            cat_probs_for_client[col] = probs.tolist()
-            current_idx += n_cats
+        if encoding_mode == "onehot":
+            current_idx = len(num_cols)
+            for col in cat_cols:
+                cats = encoder_meta["cat_categories"][col]
+                if isinstance(cats, dict):
+                    cats = cats["categories"]
+                n_cats = len(cats)
+                if n_cats <= 0 or current_idx + n_cats > X_client.shape[1]:
+                    continue
+                probs = X_client.iloc[:, current_idx : current_idx + n_cats].mean(axis=0).to_numpy(dtype=np.float32)
+                total = float(np.sum(probs))
+                if total > 0:
+                    probs = probs / total
+                else:
+                    probs = np.full(n_cats, 1.0 / n_cats, dtype=np.float32)
+                cat_probs_for_client[col] = probs.tolist()
+                current_idx += n_cats
+        else:
+            for col in cat_cols:
+                cats = encoder_meta["cat_categories"][col]
+                n_cats = len(cats)
+                if n_cats <= 0:
+                    continue
+                codes = pd.to_numeric(X_client[col], errors="coerce").to_numpy()
+                codes = np.rint(codes).astype(np.int64, copy=False)
+                codes = np.clip(codes, 0, n_cats - 1)
+                counts = np.bincount(codes, minlength=n_cats).astype(np.float32, copy=False)
+                total = float(max(1, codes.shape[0]))
+                probs = counts / total
+                cat_probs_for_client[col] = probs.tolist()
         client_cat_probs.append(cat_probs_for_client)
 
         y_client_t = _encode_target(y_client, task, target_classes)
-        client_ds = TensorDataset(
-            torch.tensor(X_client.to_numpy(dtype=np.float32, copy=False), dtype=torch.float32),
-            y_client_t,
-        )
+        client_ds = TensorDataset(torch.tensor(X_client.to_numpy(dtype=np.float32, copy=False), dtype=torch.float32), y_client_t)
         if len(client_ds) < batch_size:
             raise ValueError(
                 f"Client {client_idx} has {len(client_ds)} samples, smaller than batch_size={batch_size}. "
@@ -557,10 +608,14 @@ def load_dataset(dataset_path: Path, dataset_meta_path: Path, num_clients: int, 
         "cat_cols": cat_cols,
         "cat_dummy_cols": encoder_meta["cat_dummy_cols"],
         "cat_categories": encoder_meta["cat_categories"],
+        "cat_cardinalities": encoder_meta["cat_cardinalities"],
         "feature_columns": feature_columns,
         "target_classes": target_classes,
         "task": task,
         "num_features": X_train.shape[1],
+        "n_num_features": len(num_cols),
+        "n_cat_features": len(cat_cols),
+        "encoding_mode": encoding_mode,
         "num_classes": len(target_classes) if task in ("binary", "multiclass") else 1,
         "client_num_mean": [m.tolist() for m in client_num_means],
         "client_num_std": [s.tolist() for s in client_num_stds],
@@ -575,4 +630,5 @@ if __name__ == "__main__":
         Path("data/binary/adult/adult.csv"),
         Path("data/binary/adult/adult.yaml"),
         10,
+        encoding_mode="onehot",
     )

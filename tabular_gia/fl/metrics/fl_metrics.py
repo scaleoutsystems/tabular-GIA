@@ -72,7 +72,7 @@ def infer_task_from_criterion(criterion: torch.nn.Module) -> str:
     return "regression"
 
 
-def eval_epoch(loaders: list[DataLoader], model: torch.nn.Module, criterion: torch.nn.Module, task: str | None = None) -> dict:
+def eval(loaders: list[DataLoader], model: torch.nn.Module, criterion: torch.nn.Module, task: str | None = None) -> dict:
     if task is None:
         task = infer_task_from_criterion(criterion)
 
