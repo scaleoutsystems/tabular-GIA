@@ -1,8 +1,9 @@
 import torch
 from torch import nn
+from model.model_wrapper import ModelWrapper
 
 
-class TabularMLP(nn.Module):
+class TabularMLP(ModelWrapper):
     """"""
 
     def __init__(
@@ -10,12 +11,13 @@ class TabularMLP(nn.Module):
         d_in: int,
         d_hidden: int,
         d_out: int,
-        num_layers: int = 2,
-        norm: str = "batchnorm",
-        dropout: float = 0.0,
-        activation: str = "relu",
+        num_layers: int,
+        norm: str,
+        dropout: float,
+        activation: str,
+        task: str,
     ) -> None:
-        super().__init__()
+        super().__init__(task=task)
         if num_layers < 1:
             raise ValueError("num_layers must be >= 1")
 

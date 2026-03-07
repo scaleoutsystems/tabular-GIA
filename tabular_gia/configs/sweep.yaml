@@ -1,45 +1,87 @@
-# base
+# Sweep schema:
+# - Each section has:
+#   - default: fixed values applied to every run
+#   - grid: sweep dimensions (lists only)
+# - Only values from grid appear in run overrides.
+# INFO: Go to the config.yaml files for full information on parameters.
+
 base:
-  protocol: [fedsgd, fedavg]
-  seed: [42] # add more seeds (e.g. [42, 1337, 2026]) for multi-seed repeats
+  default:
+    protocol: fedavg
+    seed: 42
+  grid:
+    protocol: [fedsgd, fedavg]
+    seed: [7, 13, 42]
 
-# dataset
 dataset:
-  dataset_path_and_meta_path: [[data/binary/adult/adult.csv, data/binary/adult/adult.yaml]]
-  batch_size: [1, 4, 16, 64, 256]
-  # Example expanded: partition_strategy: [iid, dirichlet]
-  partition_strategy: [iid] # options: iid | dirichlet
-  # Dirichlet non-IID concentration (smaller alpha => more heterogeneous clients).
-  # Example fixed:    dirichlet_alpha: [0.3]
-  # Example expanded: dirichlet_alpha: [0.1, 0.3, 1.0]
-  # Note: if partition_strategy includes iid, alpha is ignored for iid but still expands Cartesian runs.
-  dirichlet_alpha: [0.3]
+  default:
+    dataset_path_and_meta_path: [data/binary/adult/adult.csv, data/binary/adult/adult.yaml]
+    num_workers: 0
+    pin_memory: true
+    persistent_workers: false
+    batch_size: 256
+    train_frac: 0.70
+    val_frac: 0.15
+    test_frac: 0.15
+    partition_strategy: iid
+    dirichlet_alpha: 0.3
+    min_client_samples: 1
+    dirichlet_max_attempts: 50
+  grid:
 
-# model
 model:
-  use_preset: true # NOTE: if set true, other model params will be ignored and it will default to presets in default model.yaml. Uncomment to disable to sweep all params.
-  name: [small, medium, large]
-  d_hidden: [64, 128, 256]
-  num_layers: [1, 2, 3]
-  norm: [none, batchnorm, layernorm]
-  dropout: [0.0, 0.15, 0.3]
-  activation: [relu, gelu, silu]
+  default:
+    preset: small # when preset is non-null, presets[preset] defines the model config
+    arch: mlp
+    d_hidden: 64
+    num_layers: 2
+    norm: none
+    dropout: 0.0
+    activation: relu
+    presets:
+      small: {arch: mlp, d_hidden: 64, num_layers: 2, norm: layernorm, dropout: 0.0, activation: gelu}
+      medium: {arch: mlp, d_hidden: 128, num_layers: 3, norm: layernorm, dropout: 0.1, activation: gelu}
+      large: {arch: mlp, d_hidden: 256, num_layers: 4, norm: layernorm, dropout: 0.2, activation: gelu}
+      fttransformer: {arch: fttransformer}
+  grid:
+    preset: [small, fttransformer]
+    # Explicit mode example:
+    # preset: null
+    # d_hidden: [64, 128, 256]
+    # num_layers: [1, 2, 3]
+    # norm: [none, batchnorm, layernorm]
+    # dropout: [0.0, 0.15, 0.3]
+    # activation: [relu, gelu, silu]
 
-# fl
 fl:
   fedsgd:
-    # Client/data-scale axis (one value fixed, multiple values expand runs).
-    # Example: [3, 10, 30]
-    num_clients: [10]
-  fedavg:
-    # Keep this list short unless you also tune batch_size, otherwise tiny client shards can fail with drop_last=True.
-    num_clients: [3]
-    local_steps: [1, 10, 100]
-    local_epochs: [1, 10, 100]
+    default:
+      local_steps: 1
+      local_epochs: 1
+      num_clients: 10
+      min_exposure: 10.0
+      optimizer: MetaSGD
+      lr: 0.01
+    grid:
 
-# gia sweeps over invertingconfig overrides
+  fedavg:
+    default:
+      local_steps: 1
+      local_epochs: 1
+      num_clients: 3
+      min_exposure: 10.0
+      optimizer: MetaAdam
+      lr: 0.01
+    grid:
+
 gia:
-  # Example expansion: at_iterations: [500, 1000], attack_lr: [0.01, 0.03]
-  at_iterations: [1000]
-  attack_lr: [0.03]
-  label_known: [true, false]
+  default:
+    attack_mode: round_checkpoint
+    fixed_batch_k: 1 # only used when attack_mode is fixed_batch
+    attack_schedule: exposure
+    attack_exposure_milestones: [0.0, 0.5, 1.0, 2.0, 5.0, 10.0]
+    label_known: true
+    attack_lr: 0.03
+    at_iterations: 1
+    data_extension: GiaTabularExtension
+  grid:

@@ -1,6 +1,5 @@
 """Evaluation metrics for tabular gradient inversion attacks."""
 
-import csv
 from pathlib import Path
 from typing import Dict, List
 
@@ -34,22 +33,6 @@ ATTACK_METRIC_FIELDS = (
     "num_within_1std",
     "num_within_2std",
     "cat_dist_conf",
-)
-
-ROUNDS_SUMMARY_CSV_FIELDS = (
-    "round",
-    "num_clients",
-    "total_rows",
-    "exp_min",
-    "exp_avg",
-    "exp_max",
-    *ATTACK_METRIC_FIELDS,
-)
-
-RUN_SUMMARY_CSV_FIELDS = (
-    "num_rounds",
-    "total_rows",
-    *ATTACK_METRIC_FIELDS,
 )
 
 
@@ -131,6 +114,7 @@ def compute_reconstruction_metrics(
     num_cols = feature_schema.get("num_cols", [])
     cat_cols = feature_schema.get("cat_cols", [])
     cat_categories = feature_schema.get("cat_categories", {}) or {}
+    encoding_mode = str(feature_schema.get("encoding_mode", "onehot")).strip().lower()
     num_count = len(num_cols)
     has_num = num_count > 0
     has_cat = len(cat_cols) > 0
@@ -146,6 +130,7 @@ def compute_reconstruction_metrics(
         cat_cols,
         cat_categories,
         num_std,
+        encoding_mode=encoding_mode,
     )
     nn_dist = _nearest_neighbor_distance(
         recon_tensor,
@@ -207,10 +192,21 @@ def _emr(tableak_acc: np.ndarray, min_tableak_acc: float = 1.0) -> float:
 
 
 def _iter_cat_groups(feature_schema: Dict, total_dim: int, num_count: int) -> list[dict]:
+    encoding_mode = str(feature_schema.get("encoding_mode", "onehot")).strip().lower()
     cat_cols = feature_schema.get("cat_cols", [])
     cat_categories = feature_schema.get("cat_categories", {}) or {}
     groups: list[dict] = []
     current_idx = num_count
+    if encoding_mode == "ordinal":
+        for col in cat_cols:
+            cats = cat_categories.get(col, [])
+            if isinstance(cats, dict):
+                cats = cats.get("categories", [])
+            if current_idx >= total_dim:
+                continue
+            groups.append({"name": col, "indices": [current_idx], "cats": cats})
+            current_idx += 1
+        return groups
     for col in cat_cols:
         cats = cat_categories.get(col, [])
         if isinstance(cats, dict):
@@ -248,12 +244,21 @@ def _prior_baseline_metrics(
     cat_groups = _iter_cat_groups(feature_schema, orig_tensor.shape[1], num_count)
     for group in cat_groups:
         idxs = group["indices"]
+        cats = group["cats"]
+        n_cats = len(cats)
         probs = np.asarray(probs_map.get(group["name"], []), dtype=np.float32)
-        if probs.size != len(idxs) or float(np.sum(probs)) <= 0:
-            probs = np.full(len(idxs), 1.0 / len(idxs), dtype=np.float32)
+        if n_cats <= 0:
+            continue
+        if probs.size != n_cats or float(np.sum(probs)) <= 0:
+            probs = np.full(n_cats, 1.0 / n_cats, dtype=np.float32)
+        else:
+            probs = probs / float(np.sum(probs))
         best = int(np.argmax(probs))
-        prior_tensor[:, idxs] = 0.0
-        prior_tensor[:, idxs[best]] = 1.0
+        if len(idxs) == 1:
+            prior_tensor[:, idxs[0]] = float(best)
+        else:
+            prior_tensor[:, idxs] = 0.0
+            prior_tensor[:, idxs[best]] = 1.0
 
     prior_num_acc, prior_cat_acc, prior_tableak = _tab_leak_accuracy(
         orig_tensor,
@@ -262,6 +267,7 @@ def _prior_baseline_metrics(
         cat_cols,
         feature_schema.get("cat_categories", {}) or {},
         num_std,
+        encoding_mode=str(feature_schema.get("encoding_mode", "onehot")).strip().lower(),
     )
     metrics: Dict[str, float] = {
         "prior_tableak_acc": float(np.nanmean(prior_tableak)),
@@ -307,12 +313,20 @@ def _distribution_confidence_metrics(
         probs_list: list[np.ndarray] = []
         for group in cat_groups:
             idxs = group["indices"]
+            cats = group["cats"]
+            n_cats = len(cats)
+            if n_cats <= 0:
+                continue
             probs = np.asarray(probs_map.get(group["name"], []), dtype=np.float32)
-            if probs.size != len(idxs) or float(np.sum(probs)) <= 0:
-                probs = np.full(len(idxs), 1.0 / len(idxs), dtype=np.float32)
+            if probs.size != n_cats or float(np.sum(probs)) <= 0:
+                probs = np.full(n_cats, 1.0 / n_cats, dtype=np.float32)
             else:
                 probs = probs / float(np.sum(probs))
-            pred = np.argmax(recon_np[:, idxs], axis=1)
+            if len(idxs) == 1:
+                pred = np.rint(recon_np[:, idxs[0]]).astype(np.int64)
+                pred = np.clip(pred, 0, n_cats - 1)
+            else:
+                pred = np.argmax(recon_np[:, idxs], axis=1)
             probs_list.append(probs[pred])
         if probs_list:
             cat_conf = float(np.mean(np.concatenate([p.reshape(-1) for p in probs_list])))
@@ -333,107 +347,25 @@ def _distribution_confidence_metrics(
     }
 
 
-def _weighted_metric_means(
-    records: List[Dict],
-    weights: np.ndarray,
-    excluded_keys: set[str],
-) -> Dict[str, float]:
-    metric_keys = [k for k in records[0].keys() if k not in excluded_keys]
-    means: Dict[str, float] = {}
-    for k in metric_keys:
-        values = np.array([r[k] for r in records], dtype=float)
-        valid = ~np.isnan(values)
-        if not valid.any():
-            means[k] = float("nan")
-            continue
-        if k == "nn_min":
-            means[k] = float(np.min(values[valid]))
-            continue
-        w_valid = weights[valid]
-        denom = float(np.sum(w_valid))
-        if denom <= 0:
-            means[k] = float("nan")
-            continue
-        means[k] = float(np.sum(values[valid] * w_valid) / denom)
-    return means
-
-
-def summarize_round(
-    metrics_list: List[Dict],
-    round_idx: int,
-) -> Dict | None:
-    if not metrics_list:
-        return None
-
-    rows = np.array([m["row_count"] for m in metrics_list], dtype=float)
-    total_rows = float(rows.sum()) if rows.size else 0.0
-    weights = rows / total_rows if total_rows > 0 else np.zeros_like(rows)
-    metric_means = _weighted_metric_means(metrics_list, weights, {"client_idx", "row_count"})
-
-    return {
-        "round": int(round_idx),
-        "num_clients": int(len(metrics_list)),
-        "total_rows": int(total_rows),
-        **metric_means,
-    }
-
-
-def summarize_run(round_summaries: List[Dict]) -> Dict | None:
-    if not round_summaries:
-        return None
-    rows = np.array([r["total_rows"] for r in round_summaries], dtype=float)
-    total_rows = float(rows.sum()) if rows.size else 0.0
-    weights = rows / total_rows if total_rows > 0 else np.zeros_like(rows)
-    metric_means = _weighted_metric_means(
-        round_summaries,
-        weights,
-        {"round", "num_clients", "total_rows"},
-    )
-    return {
-        "num_rounds": int(len(round_summaries)),
-        "total_rows": int(total_rows),
-        **metric_means,
-    }
-
-
-def _prepare_fixed_row(row: Dict, fieldnames: tuple[str, ...], file_label: str) -> dict:
-    unknown = sorted(set(row.keys()) - set(fieldnames))
-    if unknown:
-        raise ValueError(f"Unexpected {file_label} fields: {unknown}")
-    return {field: row.get(field, "") for field in fieldnames}
-
-
-def _write_rows_csv(out_path: Path, rows: List[Dict], fieldnames: tuple[str, ...], file_label: str) -> None:
-    if not rows:
-        return
-    ordered_rows = [_prepare_fixed_row(row, fieldnames, file_label) for row in rows]
-    with open(out_path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(fieldnames))
-        writer.writeheader()
-        for row in ordered_rows:
-            writer.writerow(row)
-
-
-def write_rounds_summary(results_dir: Path | str, round_summaries: List[Dict]) -> None:
-    out_path = Path(results_dir) / "rounds_summary.csv"
-    _write_rows_csv(out_path, round_summaries, ROUNDS_SUMMARY_CSV_FIELDS, "rounds_summary.csv")
-
-
-def write_run_summary(results_dir: Path | str, run_summary: Dict) -> None:
-    out_path = Path(results_dir) / "run_summary.csv"
-    _write_rows_csv(out_path, [run_summary], RUN_SUMMARY_CSV_FIELDS, "run_summary.csv")
-
-
 def _get_feature_groups(feature_info: Dict, total_dim: int) -> tuple[list[int], list[list[int]]]:
     """Build numeric indices and categorical one-hot groups from encoder metadata."""
     num_feats = feature_info.get('numerical_features') or feature_info.get('num_cols', [])
     cat_feats = feature_info.get('categorical_features') or feature_info.get('cat_cols', [])
     cat_categories = feature_info.get('category_mappings') or feature_info.get('cat_categories', {})
+    encoding_mode = str(feature_info.get("encoding_mode", "onehot")).strip().lower()
 
     num_count = len(num_feats)
     num_indices = list(range(min(num_count, total_dim)))
     current_idx = num_count
     cat_groups: list[list[int]] = []
+
+    if encoding_mode == "ordinal":
+        for _feature in cat_feats:
+            if current_idx >= total_dim:
+                break
+            cat_groups.append([current_idx])
+            current_idx += 1
+        return num_indices, cat_groups
 
     for feature in cat_feats:
         cats = cat_categories.get(feature)
@@ -499,8 +431,12 @@ def _nearest_neighbor_distance(
         if n_cat > 0:
             cat_dist = np.zeros((recon_np.shape[0], ref_chunk.shape[0]), dtype=np.float32)
             for group_idx, idxs in enumerate(cat_groups):
-                rec_labels = rec_cat_labels[group_idx]
-                ref_labels = np.argmax(ref_chunk[:, idxs], axis=1)
+                if len(idxs) == 1:
+                    rec_labels = np.rint(recon_np[:, idxs[0]]).astype(np.int64)
+                    ref_labels = np.rint(ref_chunk[:, idxs[0]]).astype(np.int64)
+                else:
+                    rec_labels = rec_cat_labels[group_idx]
+                    ref_labels = np.argmax(ref_chunk[:, idxs], axis=1)
                 cat_dist += (rec_labels[:, None] != ref_labels[None, :]).astype(np.float32)
             cat_dist /= n_cat
         else:
@@ -525,6 +461,7 @@ def _tab_leak_accuracy(
     cat_cols: list[str],
     cat_categories: Dict,
     num_std: np.ndarray | None = None,
+    encoding_mode: str = "onehot",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Per-row numeric, categorical, and TabLeak accuracies."""
     gt = x_true.detach().cpu().numpy()
@@ -548,6 +485,13 @@ def _tab_leak_accuracy(
         if isinstance(cats, dict):
             cats = cats.get("categories", [])
         n_cats = len(cats)
+        if encoding_mode == "ordinal":
+            if current_idx < gt.shape[1] and n_cats > 0:
+                true_code = np.clip(np.rint(gt[:, current_idx]).astype(np.int64), 0, n_cats - 1)
+                pred_code = np.clip(np.rint(pred[:, current_idx]).astype(np.int64), 0, n_cats - 1)
+                cat_hits += (true_code == pred_code).astype(float)
+                current_idx += 1
+            continue
         if n_cats <= 0 or current_idx + n_cats > gt.shape[1]:
             continue
         idxs = list(range(current_idx, current_idx + n_cats))
