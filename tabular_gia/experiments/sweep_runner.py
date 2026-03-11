@@ -3,6 +3,7 @@ from __future__ import annotations
 import itertools
 import json
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -10,17 +11,59 @@ from typing import Any
 from tqdm import tqdm
 import torch
 
+from configs.base import BaseConfig
+from configs.dataset.dataset import DatasetConfig
+from configs.fl.fedavg import FedAvgConfig
+from configs.fl.fedsgd import FedSGDConfig
+from configs.gia.gia import GiaConfig, InvertingConfig as GiaInvertingConfig
+from configs.model.model import ModelConfig
 from helper.helpers import write_json
 from helper.summary_aggregation import SeedSummaryBuilder
 from leakpro.utils.seed import seed_everything
-from tabular_gia.runner.run import RunConfig, RunEngine, RunResult, build_runtime
 from tabular_gia.helper.results_writer import SweepResultsWriter
+from tabular_gia.runner.run import RunConfig, RunEngine, RunResult, build_runtime
+
+
+RunEntry = tuple[int, dict[str, dict[str, Any]], RunConfig]
+
+
+@dataclass(frozen=True)
+class SweepSeedRunResult:
+    seed: int
+    run_config: RunConfig
+    run_result: RunResult
+
+
+@dataclass(frozen=True)
+class SweepGroupResult:
+    run_group_id: int
+    protocol: str
+    seeds: list[int]
+    overrides: dict[str, dict[str, Any]]
+    run_dir: Path
+    seed_runs: list[SweepSeedRunResult]
+    aggregated_run_summary: dict | None
+
+
+@dataclass(frozen=True)
+class SweepRunResults:
+    experiment_dir: Path
+    groups: list[SweepGroupResult]
+
+
+def _unique_values(values: list[Any]) -> list[Any]:
+    unique: list[Any] = []
+    for value in values:
+        if not any(value == seen for seen in unique):
+            unique.append(value)
+    return unique
 
 
 def _iter_grid(grid: dict[str, list[Any]]):
     if not grid:
         yield {}
         return
+
     keys = list(grid.keys())
     values = [_unique_values(grid[k]) for k in keys]
     for combo in itertools.product(*values):
@@ -30,18 +73,11 @@ def _iter_grid(grid: dict[str, list[Any]]):
 def _grid_size(grid: dict[str, list[Any]]) -> int:
     if not grid:
         return 1
+
     size = 1
     for values in grid.values():
         size *= len(_unique_values(values))
     return size
-
-
-def _unique_values(values: list[Any]) -> list[Any]:
-    unique: list[Any] = []
-    for value in values:
-        if not any(value == seen for seen in unique):
-            unique.append(value)
-    return unique
 
 
 def _iter_run_combos(
@@ -64,115 +100,114 @@ def _iter_run_combos(
 
 
 def _parse_section(name: str, section: dict[str, Any]) -> tuple[dict[str, Any], dict[str, list[Any]]]:
-    default_raw = section["default"]
-    grid_raw_obj = section["grid"]
+    default_raw = section.get("default")
+    grid_raw_obj = section.get("grid")
+
     if default_raw is None:
         default_raw = {}
     if grid_raw_obj is None:
         grid_raw_obj = {}
+
+    if type(default_raw) is not dict:
+        raise ValueError(f"Sweep section '{name}.default' must be a mapping.")
+    if type(grid_raw_obj) is not dict:
+        raise ValueError(f"Sweep section '{name}.grid' must be a mapping.")
+
     default = dict(default_raw)
-    grid_raw = dict(grid_raw_obj)
     grid: dict[str, list[Any]] = {}
-    for key, values in grid_raw.items():
-        if type(values) is list:
-            if len(values) == 0:
+    for key, values_raw in grid_raw_obj.items():
+        # Grid keys not present in defaults are invalid.
+        if key not in default:
+            raise ValueError(f"Sweep section '{name}.grid.{key}' is not a valid key in '{name}.default'.")
+
+        # Support nested grid syntax, e.g.
+        # grid: {invertingconfig: {at_iterations: [100, 1000]}}
+        if type(values_raw) is dict:
+            default_nested = default[key]
+            if type(default_nested) is not dict:
+                raise ValueError(
+                    f"Sweep section '{name}.grid.{key}' must be a list/scalar because '{name}.default.{key}' is not a mapping."
+                )
+
+            nested_grid: dict[str, list[Any]] = {}
+            for nested_key, nested_values_raw in values_raw.items():
+                if nested_key not in default_nested:
+                    raise ValueError(
+                        f"Sweep section '{name}.grid.{key}.{nested_key}' is not a valid key in '{name}.default.{key}'."
+                    )
+                nested_values = nested_values_raw if type(nested_values_raw) is list else [nested_values_raw]
+                if len(nested_values) == 0:
+                    raise ValueError(f"Sweep section '{name}.grid.{key}.{nested_key}' must be non-empty.")
+                nested_grid[nested_key] = nested_values
+
+            if not nested_grid:
                 raise ValueError(f"Sweep section '{name}.grid.{key}' must be non-empty.")
-            grid[key] = values
+
+            nested_keys = list(nested_grid.keys())
+            nested_values_list = [_unique_values(nested_grid[nested_key]) for nested_key in nested_keys]
+            nested_values: list[dict[str, Any]] = []
+            for combo in itertools.product(*nested_values_list):
+                merged_nested = deepcopy(default_nested)
+                merged_nested.update(dict(zip(nested_keys, combo)))
+                nested_values.append(merged_nested)
+            grid[key] = nested_values
             continue
-        grid[key] = [values]
-    for key, values in grid.items():
+
+        values = values_raw if type(values_raw) is list else [values_raw]
         if len(values) == 0:
             raise ValueError(f"Sweep section '{name}.grid.{key}' must be non-empty.")
+        grid[key] = values
+
     return default, grid
 
 
-def _resolve_dataset_cfg(dataset_override: dict[str, Any], config_dir: Path) -> dict[str, Any]:
-    dataset_cfg_run = deepcopy(dataset_override)
-    for dataset_key, value in dataset_override.items():
-        if dataset_key == "dataset_path_and_meta_path":
-            dataset_cfg_run["dataset_path"], dataset_cfg_run["dataset_meta_path"] = value
-        else:
-            dataset_cfg_run[dataset_key] = value
+def _resolve_dataset_cfg(dataset_params: dict[str, Any]) -> dict[str, Any]:
+    dataset_cfg = deepcopy(dataset_params)
+    if "dataset_path_and_meta_path" in dataset_cfg:
+        dataset_path, dataset_meta_path = dataset_cfg.pop("dataset_path_and_meta_path")
+        dataset_cfg["dataset_path"] = dataset_path
+        dataset_cfg["dataset_meta_path"] = dataset_meta_path
 
     for path_key in ("dataset_path", "dataset_meta_path"):
-        raw_path = Path(dataset_cfg_run[path_key])
-        if not raw_path.is_absolute():
-            raw_path = config_dir.parent / raw_path
-        dataset_cfg_run[path_key] = str(raw_path)
-    return dataset_cfg_run
+        if path_key not in dataset_cfg:
+            raise ValueError(f"Sweep dataset config missing required key: '{path_key}'.")
+        dataset_cfg[path_key] = str(dataset_cfg[path_key])
+
+    return dataset_cfg
 
 
 def _resolve_model_cfg(
     *,
     model_params: dict[str, Any],
     model_presets: dict[str, dict[str, Any]],
-) -> dict[str, Any]:
+) -> tuple[str | None, dict[str, Any]]:
     preset_name = model_params["preset"]
     if preset_name is not None:
         if preset_name not in model_presets:
             raise ValueError(f"Preset '{preset_name}' not found in model config.")
-        return deepcopy(model_presets[preset_name])
+        return preset_name, deepcopy(model_presets[preset_name])
+
     model_explicit = deepcopy(model_params)
-    model_explicit.pop("preset")
-    model_explicit.pop("presets")
+    model_explicit.pop("preset", None)
+    model_explicit.pop("presets", None)
     if not model_explicit:
         raise ValueError("Sweep model config resolved to empty explicit model params while preset=null.")
-    return model_explicit
-
-
-def _resolve_gia_cfg(
-    *,
-    gia_params: dict[str, Any],
-) -> dict[str, Any]:
-    protocol_cfg: dict[str, Any] = {}
-    invertingconfig: dict[str, Any] = {}
-    protocol_keys = {
-        "attack_mode",
-        "fixed_batch_k",
-        "attack_schedule",
-        "attack_rounds",
-        "attack_num_checkpoints",
-        "attack_exposure_milestones",
-    }
-    for key, value in gia_params.items():
-        if key in protocol_keys:
-            protocol_cfg[key] = value
-        else:
-            invertingconfig[key] = value
-    if "attack_mode" not in protocol_cfg:
-        raise ValueError("Sweep gia config missing required key: 'attack_mode'.")
-    if "attack_schedule" not in protocol_cfg:
-        raise ValueError("Sweep gia config missing required key: 'attack_schedule'.")
-    if "fixed_batch_k" not in protocol_cfg:
-        raise ValueError("Sweep gia config missing required key: 'fixed_batch_k'.")
-    if "attack_exposure_milestones" not in protocol_cfg:
-        raise ValueError("Sweep gia config missing required key: 'attack_exposure_milestones'.")
-    if not invertingconfig:
-        raise ValueError("Sweep gia config resolved empty invertingconfig.")
-    protocol_cfg["invertingconfig"] = invertingconfig
-    return protocol_cfg
+    return None, model_explicit
 
 
 def build_run_configs(
     sweep_cfg: dict[str, Any],
     *,
-    config_dir: Path,
-) -> list[dict[str, Any]]:
-    base_section = sweep_cfg["base"]
-    dataset_section = sweep_cfg["dataset"]
-    model_section = sweep_cfg["model"]
-    fl_section = sweep_cfg["fl"]
-    gia_section = sweep_cfg["gia"]
+    experiment_dir: Path,
+    fl_only: bool,
+) -> list[RunEntry]:
+    base_default, base_grid_full = _parse_section("base", sweep_cfg["base"])
+    dataset_default, dataset_grid = _parse_section("dataset", sweep_cfg["dataset"])
+    model_default, model_grid_full = _parse_section("model", sweep_cfg["model"])
+    gia_default, gia_grid = _parse_section("gia", sweep_cfg["gia"])
 
-    base_default, base_grid_full = _parse_section("base", base_section)
-    dataset_default, dataset_grid = _parse_section("dataset", dataset_section)
-    model_default, model_grid_full = _parse_section("model", model_section)
-    gia_default, gia_grid = _parse_section("gia", gia_section)
-    if "presets" not in model_default:
-        raise ValueError("Sweep model.default must include 'presets'.")
-    model_presets = deepcopy(model_default["presets"])
-    if type(model_presets) is not dict or not model_presets:
-        raise ValueError("Sweep model.default.presets must be a non-empty mapping.")
+    if "preset" not in model_default:
+        model_default["preset"] = None
 
     if "protocol" in base_grid_full:
         protocols = [str(p) for p in base_grid_full["protocol"]]
@@ -180,229 +215,286 @@ def build_run_configs(
         protocols = [str(base_default["protocol"])]
     else:
         raise ValueError("Sweep config must define protocol in base.grid.protocol or base.default.protocol.")
+    protocols = _unique_values(protocols)
     if not protocols:
         raise ValueError("Sweep config resolved an empty protocol list.")
 
     if "seed" not in base_grid_full:
         raise ValueError("Sweep config must define base.grid.seed as a non-empty list.")
-    raw_seeds = base_grid_full["seed"]
-    seeds = [int(s) for s in _unique_values(raw_seeds)]
+    seeds = [int(s) for s in _unique_values(base_grid_full["seed"])]
     if not seeds:
         raise ValueError("Sweep config must define at least one seed.")
 
     base_grid = {k: v for k, v in base_grid_full.items() if k not in {"protocol", "seed"}}
 
-    model_params_for_mode = deepcopy(model_default)
-    model_params_for_mode.update({k: v[0] for k, v in model_grid_full.items()})
-    preset_for_mode = model_params_for_mode["preset"]
-    if preset_for_mode is not None:
-        model_presets_selected = model_grid_full["preset"] if "preset" in model_grid_full else [model_default["preset"]]
-        if not model_presets_selected:
-            raise ValueError("Sweep config sets model preset mode but model.preset resolved empty.")
-        model_grid = {"preset": model_presets_selected}
+    preset_grid_values = model_grid_full.get("preset")
+    explicit_model_mode: bool
+    if preset_grid_values is not None:
+        preset_values = _unique_values(preset_grid_values)
+        has_none = any(value is None for value in preset_values)
+        has_non_none = any(value is not None for value in preset_values)
+        if has_none and has_non_none:
+            raise ValueError("Sweep model.grid.preset cannot mix null and non-null values.")
+        explicit_model_mode = has_none
     else:
+        explicit_model_mode = model_default["preset"] is None
+
+    if explicit_model_mode:
         model_grid = {k: v for k, v in model_grid_full.items() if k != "preset"}
         if not model_grid:
-            raise ValueError("Sweep must define model.preset or explicit model parameter lists when preset is null.")
+            raise ValueError("Sweep must define explicit model parameter lists when preset is null.")
+    else:
+        if "presets" not in model_default:
+            raise ValueError("Sweep model.default must include 'presets' in preset mode.")
+        if type(model_default["presets"]) is not dict or not model_default["presets"]:
+            raise ValueError("Sweep model.default.presets must be a non-empty mapping in preset mode.")
+        presets = preset_grid_values if preset_grid_values is not None else [model_default["preset"]]
+        if not presets:
+            raise ValueError("Sweep config sets model preset mode but model.preset resolved empty.")
+        model_grid = {"preset": presets}
 
-    run_configs: list[dict[str, Any]] = []
-    protocol_fl_sweep_defaults: dict[str, dict[str, Any]] = {}
-    protocol_fl_sweep_grids: dict[str, dict[str, list[Any]]] = {}
+    protocol_fl_defaults: dict[str, dict[str, Any]] = {}
+    protocol_fl_grids: dict[str, dict[str, list[Any]]] = {}
     total_specs = 0
     common_size = _grid_size(base_grid) * _grid_size(dataset_grid) * _grid_size(model_grid) * _grid_size(gia_grid)
 
     for protocol in protocols:
-        if protocol not in fl_section:
+        if protocol not in sweep_cfg["fl"]:
             raise ValueError(f"Sweep config missing fl section for protocol '{protocol}'.")
-        fl_default, fl_grid = _parse_section(f"fl.{protocol}", fl_section[protocol])
-        protocol_fl_sweep_defaults[protocol] = fl_default
-        protocol_fl_sweep_grids[protocol] = fl_grid
+        fl_default, fl_grid = _parse_section(f"fl.{protocol}", sweep_cfg["fl"][protocol])
+        protocol_fl_defaults[protocol] = fl_default
+        protocol_fl_grids[protocol] = fl_grid
         total_specs += common_size * _grid_size(fl_grid)
 
+    run_entries: list[RunEntry] = []
     with tqdm(total=total_specs, desc="Building sweep run configs", unit="config", leave=False) as bar:
-        run_id = 0
+        run_group_id = 0
         for protocol, base_override, dataset_override, model_override, gia_override, fl_override in _iter_run_combos(
             protocols=protocols,
             base_grid=base_grid,
             dataset_grid=dataset_grid,
             model_grid=model_grid,
             gia_grid=gia_grid,
-            fl_grids=protocol_fl_sweep_grids,
+            fl_grids=protocol_fl_grids,
         ):
             bar.update(1)
-            run_id += 1
-
-            base_cfg_run = deepcopy(base_default)
-            base_cfg_run["protocol"] = protocol
-            base_cfg_run.update(base_override)
-            base_cfg_run.pop("seed", None)
+            run_group_id += 1
 
             dataset_params = deepcopy(dataset_default)
             dataset_params.update(dataset_override)
-            dataset_cfg_run = _resolve_dataset_cfg(dataset_params, config_dir)
+            dataset_cfg_dict = _resolve_dataset_cfg(dataset_params)
+
             model_params = deepcopy(model_default)
+            if explicit_model_mode:
+                model_params["preset"] = None
             model_params.update(model_override)
-            model_cfg_run = _resolve_model_cfg(
+            model_preset, model_cfg_dict = _resolve_model_cfg(
                 model_params=model_params,
-                model_presets=model_presets,
+                model_presets=model_params.get("presets", {}),
             )
+
             gia_params = deepcopy(gia_default)
             gia_params.update(gia_override)
-            gia_cfg_run = _resolve_gia_cfg(
-                gia_params=gia_params,
-            )
-            if "attack_schedule" in base_cfg_run:
-                gia_cfg_run["attack_schedule"] = base_cfg_run["attack_schedule"]
+            if "invertingconfig" not in gia_params:
+                raise ValueError("Sweep gia config missing required key: 'invertingconfig'.")
+            gia_cfg_params = deepcopy(gia_params)
+            invertingconfig_params = gia_cfg_params.pop("invertingconfig")
+            if type(invertingconfig_params) is not dict:
+                raise ValueError("Sweep gia.invertingconfig must be a mapping.")
 
-            fl_cfg_run = deepcopy(protocol_fl_sweep_defaults[protocol])
-            fl_cfg_run.update(fl_override)
+            fl_cfg_dict = deepcopy(protocol_fl_defaults[protocol])
+            fl_cfg_dict.update(fl_override)
 
-            overrides = {
+            overrides: dict[str, dict[str, Any]] = {
                 "base": base_override,
                 "dataset": dataset_override,
                 "model": model_override,
                 "gia": gia_override,
                 "fl": fl_override,
             }
-            run_configs.append(
-                {
-                    "run_id": run_id,
-                    "seeds": seeds,
-                    "overrides": overrides,
-                    "base_cfg": base_cfg_run,
-                    "dataset_cfg": dataset_cfg_run,
-                    "model_cfg": model_cfg_run,
-                    "fl_cfg": fl_cfg_run,
-                    "gia_cfg": gia_cfg_run,
-                }
-            )
 
-    return run_configs
+            run_dir = experiment_dir / protocol / f"run_{run_group_id:04d}"
+            for seed in seeds:
+                seed_dir = run_dir / f"seed_{seed:04d}"
+                if "presets" in model_params and type(model_params["presets"]) is dict:
+                    model_cfg = ModelConfig(
+                        preset=model_preset,
+                        presets=deepcopy(model_params["presets"]),
+                        **deepcopy(model_cfg_dict),
+                    )
+                else:
+                    model_cfg = ModelConfig(
+                        preset=model_preset,
+                        **deepcopy(model_cfg_dict),
+                    )
+                run_config = RunConfig(
+                    base_cfg=BaseConfig(seed=seed, protocol=protocol),
+                    dataset_cfg=DatasetConfig(**deepcopy(dataset_cfg_dict)),
+                    model_cfg=model_cfg,
+                    fl_cfg=FedAvgConfig(**deepcopy(fl_cfg_dict)) if protocol == "fedavg" else FedSGDConfig(**deepcopy(fl_cfg_dict)),
+                    gia_cfg=GiaConfig(
+                        **gia_cfg_params,
+                        invertingconfig=GiaInvertingConfig(**invertingconfig_params),
+                    ),
+                    results_dir=seed_dir / "artifacts",
+                    fl_only=fl_only,
+                )
+                run_entries.append((run_group_id, deepcopy(overrides), run_config))
+
+    return run_entries
 
 
 class SweepExperimentRunner:
     def __init__(
         self,
         *,
-        sweep_cfg: dict,
-        config_dir: Path,
+        sweep_cfg: dict[str, Any],
         results_dir: Path,
         fl_only: bool = False,
     ) -> None:
         self.sweep_cfg = sweep_cfg
-        self.config_dir = config_dir
         self.results_dir = results_dir
         self.fl_only = fl_only
         self.csv_writer = SweepResultsWriter()
         self.seed_summary_builder = SeedSummaryBuilder()
 
-    def run(self) -> None:
+    def run(self) -> SweepRunResults:
         experiment_id = f"experiment_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
         experiment_dir = self.results_dir / experiment_id
-        run_configs = build_run_configs(
-            sweep_cfg=self.sweep_cfg,
-            config_dir=self.config_dir,
-        )
         experiment_dir.mkdir(parents=True, exist_ok=True)
+
+        run_entries = build_run_configs(
+            sweep_cfg=self.sweep_cfg,
+            experiment_dir=experiment_dir,
+            fl_only=self.fl_only,
+        )
+
+        grouped_entries: dict[int, list[tuple[dict[str, dict[str, Any]], RunConfig]]] = {}
+        group_order: list[int] = []
+        for run_group_id, overrides, run_config in run_entries:
+            if run_group_id not in grouped_entries:
+                grouped_entries[run_group_id] = []
+                group_order.append(run_group_id)
+            grouped_entries[run_group_id].append((overrides, run_config))
 
         run_records: list[dict] = []
         sweep_result_rows_per_seed: list[dict] = []
         sweep_result_rows_agg: list[dict] = []
-        for run_config in run_configs:
-            run_id = int(run_config["run_id"])
-            protocol = str(run_config["base_cfg"]["protocol"])
-            seeds = [int(s) for s in run_config["seeds"]]
+        group_results: list[SweepGroupResult] = []
 
-            run_dir = experiment_dir / protocol / f"run_{run_id:04d}"
-            run_dir.mkdir(parents=True, exist_ok=True)
+        for run_group_id in group_order:
+            entries = grouped_entries[run_group_id]
+            first_overrides, first_run_config = entries[0]
+            protocol = first_run_config.base_cfg.protocol
+            seeds = [entry_run_config.base_cfg.seed for _, entry_run_config in entries]
+            run_dir = first_run_config.results_dir.parent.parent
+
             write_json(
                 run_dir / "run_config.json",
                 {
-                    "base": run_config["base_cfg"],
+                    "base": first_run_config.base_cfg.to_dict(),
                     "seeds": seeds,
-                    "dataset": run_config["dataset_cfg"],
-                    "model": run_config["model_cfg"],
-                    "gia": {protocol: run_config["gia_cfg"]},
-                    "fl": run_config["fl_cfg"],
-                    "overrides": run_config["overrides"],
+                    "dataset": first_run_config.dataset_cfg.to_dict(),
+                    "model": first_run_config.model_cfg.to_dict(),
+                    "gia": {protocol: first_run_config.gia_cfg.to_dict()},
+                    "fl": first_run_config.fl_cfg.to_dict(),
+                    "overrides": first_overrides,
                 },
             )
 
             run_results_for_run: list[RunResult] = []
-            for run_seed in seeds:
+            seed_runs: list[SweepSeedRunResult] = []
+            for overrides, run_config in entries:
+                run_seed = run_config.base_cfg.seed
+                seed_dir = run_config.results_dir.parent
+                seed_dir.mkdir(parents=True, exist_ok=True)
+
+                write_json(
+                    seed_dir / "resolved_config.json",
+                    {
+                        "base": run_config.base_cfg.to_dict(),
+                        "dataset": run_config.dataset_cfg.to_dict(),
+                        "model": run_config.model_cfg.to_dict(),
+                        "gia": {protocol: run_config.gia_cfg.to_dict()},
+                        "fl": run_config.fl_cfg.to_dict(),
+                        "overrides": overrides,
+                    },
+                )
+
                 seed_everything(run_seed)
                 torch.use_deterministic_algorithms(True)
                 torch.backends.cudnn.benchmark = False
                 torch.set_float32_matmul_precision("high")
-                dataset_cfg_run = deepcopy(run_config["dataset_cfg"])
-                dataset_cfg_run["seed"] = int(run_seed)
-                seed_dir = run_dir / f"seed_{int(run_seed):04d}"
-                seed_dir.mkdir(parents=True, exist_ok=True)
 
-                base_cfg_seed = deepcopy(run_config["base_cfg"])
-                base_cfg_seed["seed"] = int(run_seed)
-                write_json(
-                    seed_dir / "resolved_config.json",
-                    {
-                        "base": base_cfg_seed,
-                        "dataset": dataset_cfg_run,
-                        "model": run_config["model_cfg"],
-                        "gia": {protocol: run_config["gia_cfg"]},
-                        "fl": run_config["fl_cfg"],
-                        "overrides": run_config["overrides"],
-                    },
+                runtime = build_runtime(run_config)
+                run_result = RunEngine(run_config, runtime).run()
+                run_results_for_run.append(run_result)
+                seed_runs.append(
+                    SweepSeedRunResult(
+                        seed=run_seed,
+                        run_config=run_config,
+                        run_result=run_result,
+                    )
                 )
 
-                run_seed_config = RunConfig(
-                    protocol=protocol,
-                    dataset_cfg=dataset_cfg_run,
-                    model_cfg=deepcopy(run_config["model_cfg"]),
-                    fl_cfg=deepcopy(run_config["fl_cfg"]),
-                    gia_cfg=deepcopy(run_config["gia_cfg"]),
-                    results_dir=seed_dir / "artifacts",
-                    fl_only=self.fl_only,
-                )
-                runtime = build_runtime(run_seed_config)
-                run_result = RunEngine(run_seed_config, runtime).run()
                 run_summary = run_result.run_summary
                 if run_summary is None:
                     if not self.fl_only:
                         raise ValueError(
-                            f"Run summary missing for run_id={run_id}, seed={run_seed}. "
+                            f"Run summary missing for run_id={run_group_id}, seed={run_seed}. "
                             "This sweep mode requires run_summary output."
                         )
-                    run_results_for_run.append(run_result)
                     continue
 
-                run_results_for_run.append(run_result)
-                row = {"run_id": run_id, "seed": int(run_seed)}
+                row = {"run_id": run_group_id, "seed": run_seed}
                 row.update(run_summary)
                 sweep_result_rows_per_seed.append(row)
 
             seed_aggregate = self.seed_summary_builder.build_seed_aggregate(run_results_for_run)
             self.csv_writer.write_seed_aggregate(run_dir, seed_aggregate)
+            aggregated_run_summary: dict | None = None
             if seed_aggregate.run_summary is None:
                 if not self.fl_only:
                     raise ValueError(
-                        f"Aggregated run summary missing for run_id={run_id}. "
+                        f"Aggregated run summary missing for run_id={run_group_id}. "
                         "This sweep mode requires aggregated run_summary output."
                     )
             else:
+                aggregated_run_summary = dict(seed_aggregate.run_summary)
                 sweep_result_rows_agg.append(
-                    {"run_id": run_id, "num_seeds": int(len(run_results_for_run)), **seed_aggregate.run_summary}
+                    {
+                        "run_id": run_group_id,
+                        "num_seeds": len(run_results_for_run),
+                        **seed_aggregate.run_summary,
+                    }
                 )
 
             run_records.append(
                 {
-                    "run_id": run_id,
+                    "run_id": run_group_id,
                     "protocol": protocol,
                     "seeds": seeds,
                     "run_dir": str(run_dir),
-                    "overrides": run_config["overrides"],
+                    "overrides": first_overrides,
                 }
+            )
+            group_results.append(
+                SweepGroupResult(
+                    run_group_id=run_group_id,
+                    protocol=protocol,
+                    seeds=list(seeds),
+                    overrides=deepcopy(first_overrides),
+                    run_dir=run_dir,
+                    seed_runs=seed_runs,
+                    aggregated_run_summary=aggregated_run_summary,
+                )
             )
 
         with open(experiment_dir / "sweep_runs.json", "w", encoding="utf-8") as f:
             json.dump(run_records, f, indent=2)
         self.csv_writer.write_sweep_results(experiment_dir, sweep_result_rows_agg)
         self.csv_writer.write_sweep_results_per_seed(experiment_dir, sweep_result_rows_per_seed)
+        return SweepRunResults(
+            experiment_dir=experiment_dir,
+            groups=group_results,
+        )

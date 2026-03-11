@@ -10,7 +10,14 @@ from torch.utils.data import DataLoader
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+TABULAR_GIA_ROOT = Path(__file__).resolve().parents[1]
 
+from configs.dataset.dataset import DatasetConfig
+from configs.base import BaseConfig
+from configs.fl.fedavg import FedAvgConfig
+from configs.fl.fedsgd import FedSGDConfig
+from configs.gia.gia import GiaConfig
+from configs.model.model import ModelConfig
 from fl.dataloader.tabular_dataloader import load_dataset
 from helper.summary_aggregation import (
     RunSummaryBuilder,
@@ -29,11 +36,11 @@ logging.getLogger("leakpro").setLevel(logging.WARNING)
 
 @dataclass(frozen=True)
 class RunConfig:
-    protocol: str
-    dataset_cfg: dict
-    model_cfg: dict
-    fl_cfg: dict
-    gia_cfg: dict
+    base_cfg: BaseConfig
+    dataset_cfg: DatasetConfig
+    model_cfg: ModelConfig
+    fl_cfg: FedAvgConfig | FedSGDConfig
+    gia_cfg: GiaConfig
     results_dir: Path
     fl_only: bool
 
@@ -54,20 +61,30 @@ def _count_model_params(model: torch.nn.Module) -> tuple[int, int]:
 
 
 def build_runtime(config: RunConfig) -> Runtime:
-    fl_cfg = deepcopy(config.fl_cfg)
-    num_clients = int(fl_cfg["num_clients"])
-    dataset_cfg = deepcopy(config.dataset_cfg)
-    preset_name, resolved_model_cfg = ModelWrapper.resolve_model_cfg(config.model_cfg)
-    if preset_name is not None:
-        logger.info("Model preset: %s", preset_name)
-    else:
-        logger.info("Model config: %s", resolved_model_cfg)
+    num_clients = config.fl_cfg.num_clients
+    max_client_dataset_examples = None
+    if config.base_cfg.protocol == "fedavg" and isinstance(config.fl_cfg, FedAvgConfig):
+        max_client_dataset_examples = config.fl_cfg.max_client_dataset_examples
+
+    logger.info("Model config: %s", config.model_cfg)
     encoding_mode = ModelWrapper.infer_encoding_mode(config.model_cfg)
+    dataset_cfg = deepcopy(config.dataset_cfg)
+    dataset_path = Path(dataset_cfg.dataset_path)
+    if not dataset_path.is_absolute():
+        dataset_path = TABULAR_GIA_ROOT / dataset_path
+    dataset_cfg.dataset_path = str(dataset_path)
+
+    dataset_meta_path = Path(dataset_cfg.dataset_meta_path)
+    if not dataset_meta_path.is_absolute():
+        dataset_meta_path = TABULAR_GIA_ROOT / dataset_meta_path
+    dataset_cfg.dataset_meta_path = str(dataset_meta_path)
 
     client_dataloaders, val_loader, test_loader, feature_schema = load_dataset(
-        **dataset_cfg,
+        dataset_cfg=dataset_cfg,
         num_clients=num_clients,
+        seed=config.base_cfg.seed,
         encoding_mode=encoding_mode,
+        max_client_dataset_examples=max_client_dataset_examples,
     )
 
     model_wrapper = ModelWrapper.from_config(
@@ -116,7 +133,7 @@ class RunEngine:
     def _build_callbacks(
         self,
         runtime: Runtime,
-        fl_cfg: dict,
+        fl_cfg: FedAvgConfig | FedSGDConfig,
     ) -> tuple[FLCallbacks, RunSummaryBuilder, RunCsvWriter, AttackEngine | None]:
         csv_sink = RunCsvWriter(self.results_dir)
         summary_builder = RunSummaryBuilder()
@@ -124,10 +141,10 @@ class RunEngine:
             return FLCallbacks(attack_init_fn=None, attack_fn=None), summary_builder, csv_sink, None
 
         attack_engine = AttackEngine(
-            protocol=self.config.protocol,
+            protocol=self.config.base_cfg.protocol,
             gia_cfg=self.config.gia_cfg,
             fl_cfg=fl_cfg,
-            dataset_cfg=self.config.dataset_cfg,
+            seed=self.config.base_cfg.seed,
             feature_schema=runtime.feature_schema,
             client_dataloaders=runtime.client_dataloaders,
             criterion=runtime.model_wrapper.criterion,
@@ -139,10 +156,11 @@ class RunEngine:
         )
         return callbacks, summary_builder, csv_sink, attack_engine
 
-    def _run_fl(self, runtime: Runtime, fl_cfg: dict, callbacks: FLCallbacks):
+    def _run_fl(self, runtime: Runtime, fl_cfg: FedAvgConfig | FedSGDConfig, callbacks: FLCallbacks):
         trainer = build_fl_trainer(
-            protocol=self.config.protocol,
+            protocol=self.config.base_cfg.protocol,
             fl_cfg=fl_cfg,
+            batch_size=self.config.dataset_cfg.batch_size,
             client_dataloaders=runtime.client_dataloaders,
             val_loader=runtime.val_loader,
             test_loader=runtime.test_loader,
@@ -152,8 +170,7 @@ class RunEngine:
 
     def run(self) -> RunResult:
         logger.info("RunConfig: %s", self.config)
-        fl_cfg = deepcopy(self.config.fl_cfg)
-        fl_cfg["batch_size"] = int(self.config.dataset_cfg["batch_size"])
+        fl_cfg = self.config.fl_cfg
 
         callbacks, summary_builder, csv_sink, attack_engine = self._build_callbacks(self.runtime, fl_cfg)
         fl_result = self._run_fl(self.runtime, fl_cfg, callbacks)

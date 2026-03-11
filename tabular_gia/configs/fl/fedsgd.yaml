@@ -1,6 +1,0 @@
-local_steps: 1 # NOTE: always 1 in fedsgd. 1 single batch
-local_epochs: 1 # NOTE: always 1 in fedsgd. 1 single batch step iteration
-num_clients: 10
-min_exposure: 10.0 # stop when least-exposed client reaches this effective pass count
-optimizer: MetaSGD # unused: because train_nostep does no optimizer step
-lr: 0.01

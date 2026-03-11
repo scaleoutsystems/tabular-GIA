@@ -1,6 +1,0 @@
-local_steps: all # integer minibatch steps per round, or 'all' for one full local dataloader pass per round (classic FedAvg)
-local_epochs: 1 # meaning how many iterations over local_steps batches each communication round
-num_clients: 3
-min_exposure: 10.0 # stop when least-exposed client reaches this effective pass count
-optimizer: MetaAdam
-lr: 0.01

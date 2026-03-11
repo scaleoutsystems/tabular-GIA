@@ -7,8 +7,11 @@ from pathlib import Path
 from helper.summary_aggregation import (
     ATTACKS_CSV_FIELDS,
     FL_CSV_FIELDS,
+    FL_STATS_CSV_FIELDS,
     ROUNDS_SUMMARY_CSV_FIELDS,
+    ROUNDS_SUMMARY_STATS_CSV_FIELDS,
     RUN_SUMMARY_CSV_FIELDS,
+    RUN_SUMMARY_STATS_CSV_FIELDS,
     SWEEP_RESULTS_CSV_FIELDS,
     SWEEP_RESULTS_PER_SEED_CSV_FIELDS,
     SeedAggregationResult,
@@ -107,9 +110,22 @@ class RunCsvWriter:
 class SweepResultsWriter:
     _AGG_TABLES: dict[str, TableSpec] = {
         "fl": TableSpec("fl.csv", FL_CSV_FIELDS, "aggregated/fl.csv", "w"),
+        "fl_stats": TableSpec("fl_stats.csv", FL_STATS_CSV_FIELDS, "aggregated/fl_stats.csv", "w"),
         "attacks": TableSpec("attacks.csv", ATTACKS_CSV_FIELDS, "aggregated/attacks.csv", "w"),
         "rounds_summary": TableSpec("rounds_summary.csv", ROUNDS_SUMMARY_CSV_FIELDS, "aggregated/rounds_summary.csv", "w"),
+        "rounds_summary_stats": TableSpec(
+            "rounds_summary_stats.csv",
+            ROUNDS_SUMMARY_STATS_CSV_FIELDS,
+            "aggregated/rounds_summary_stats.csv",
+            "w",
+        ),
         "run_summary": TableSpec("run_summary.csv", RUN_SUMMARY_CSV_FIELDS, "aggregated/run_summary.csv", "w"),
+        "run_summary_stats": TableSpec(
+            "run_summary_stats.csv",
+            RUN_SUMMARY_STATS_CSV_FIELDS,
+            "aggregated/run_summary_stats.csv",
+            "w",
+        ),
     }
     _SWEEP_TABLES: dict[str, TableSpec] = {
         "sweep_results": TableSpec("sweep_results.csv", SWEEP_RESULTS_CSV_FIELDS, "sweep_results.csv", "w"),
@@ -136,11 +152,20 @@ class SweepResultsWriter:
     def write_aggregated_attacks(self, aggregated_dir: Path, rows: list[dict]) -> None:
         self._write_agg(aggregated_dir, "attacks", rows)
 
+    def write_aggregated_fl_stats(self, aggregated_dir: Path, rows: list[dict]) -> None:
+        self._write_agg(aggregated_dir, "fl_stats", rows)
+
     def write_aggregated_rounds(self, aggregated_dir: Path, rows: list[dict]) -> None:
         self._write_agg(aggregated_dir, "rounds_summary", rows)
 
+    def write_aggregated_rounds_stats(self, aggregated_dir: Path, rows: list[dict]) -> None:
+        self._write_agg(aggregated_dir, "rounds_summary_stats", rows)
+
     def write_aggregated_run_summary(self, aggregated_dir: Path, row: dict) -> None:
         self._write_agg(aggregated_dir, "run_summary", [row])
+
+    def write_aggregated_run_summary_stats(self, aggregated_dir: Path, row: dict) -> None:
+        self._write_agg(aggregated_dir, "run_summary_stats", [row])
 
     def write_sweep_results(self, experiment_dir: Path, rows: list[dict]) -> None:
         self._write_sweep(experiment_dir, "sweep_results", rows)
@@ -152,7 +177,11 @@ class SweepResultsWriter:
         aggregated_dir = run_dir / "aggregated"
         aggregated_dir.mkdir(parents=True, exist_ok=True)
         self.write_aggregated_fl(aggregated_dir, aggregate.fl_rows)
+        self.write_aggregated_fl_stats(aggregated_dir, aggregate.fl_rows_stats)
         self.write_aggregated_attacks(aggregated_dir, aggregate.attack_rows)
         self.write_aggregated_rounds(aggregated_dir, aggregate.round_summaries)
+        self.write_aggregated_rounds_stats(aggregated_dir, aggregate.round_summaries_stats)
         if aggregate.run_summary is not None:
             self.write_aggregated_run_summary(aggregated_dir, aggregate.run_summary)
+        if aggregate.run_summary_stats is not None:
+            self.write_aggregated_run_summary_stats(aggregated_dir, aggregate.run_summary_stats)
