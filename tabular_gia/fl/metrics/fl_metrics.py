@@ -14,6 +14,7 @@ FL_METRIC_FIELDS = (
     "precision_macro",
     "recall_macro",
     "f1_macro",
+    "f1_weighted",
     "mse",
     "mae",
     "r2",
@@ -62,6 +63,19 @@ def _f1_macro_multiclass(conf_mat: torch.Tensor) -> float:
     denom = (2 * tp) + fp + fn
     f1 = torch.where(denom > 0, (2 * tp) / denom, torch.zeros_like(denom))
     return float(f1.mean().item())
+
+
+def _f1_weighted_multiclass(conf_mat: torch.Tensor) -> float:
+    tp = conf_mat.diag().float()
+    fp = conf_mat.sum(dim=0).float() - tp
+    fn = conf_mat.sum(dim=1).float() - tp
+    denom = (2 * tp) + fp + fn
+    f1 = torch.where(denom > 0, (2 * tp) / denom, torch.zeros_like(denom))
+    support = conf_mat.sum(dim=1).float()
+    total_support = support.sum()
+    if total_support <= 0:
+        return float("nan")
+    return float((f1 * support).sum().item() / total_support.item())
 
 
 def infer_task_from_criterion(criterion: torch.nn.Module) -> str:
@@ -147,6 +161,7 @@ def eval(loaders: list[DataLoader], model: torch.nn.Module, criterion: torch.nn.
             stats["precision_macro"] = _precision_macro_multiclass(conf_mat) if conf_mat is not None else float("nan")
             stats["recall_macro"] = _recall_macro_multiclass(conf_mat) if conf_mat is not None else float("nan")
             stats["f1_macro"] = _f1_macro_multiclass(conf_mat) if conf_mat is not None else float("nan")
+            stats["f1_weighted"] = _f1_weighted_multiclass(conf_mat) if conf_mat is not None else float("nan")
     else:
         y_mean = sum_y / max(1, total)
         ss_tot = sum_y2 - total * (y_mean ** 2)

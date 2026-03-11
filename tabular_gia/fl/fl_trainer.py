@@ -97,46 +97,79 @@ class FLTrainer:
         if stage not in {"val", "test"}:
             raise ValueError(f"Unknown stage '{stage}'")
 
+        def _metric_str(stats: dict, key: str) -> str:
+            value = stats.get(key, float("nan"))
+            try:
+                return f"{float(value):.4f}"
+            except (TypeError, ValueError):
+                return "nan"
+
         if self.task == "binary":
             if stage == "val":
                 progress_write(
-                    "Rounds %d - train_loss=%.4f train_acc=%.4f val_loss=%.4f val_acc=%.4f"
+                    "Rounds %d - train_loss=%s train_acc=%s train_f1=%s train_roc_auc=%s train_pr_auc=%s "
+                    "val_loss=%s val_acc=%s val_f1=%s val_roc_auc=%s val_pr_auc=%s"
                     % (
                         executed_rounds,
-                        train_stats["loss"],
-                        train_stats["acc"],
-                        stage_stats["loss"],
-                        stage_stats["acc"],
+                        _metric_str(train_stats, "loss"),
+                        _metric_str(train_stats, "acc"),
+                        _metric_str(train_stats, "f1"),
+                        _metric_str(train_stats, "roc_auc"),
+                        _metric_str(train_stats, "pr_auc"),
+                        _metric_str(stage_stats, "loss"),
+                        _metric_str(stage_stats, "acc"),
+                        _metric_str(stage_stats, "f1"),
+                        _metric_str(stage_stats, "roc_auc"),
+                        _metric_str(stage_stats, "pr_auc"),
                     )
                 )
                 return
-            progress_write("Test - loss=%.4f acc=%.4f" % (stage_stats["loss"], stage_stats["acc"]))
+            progress_write(
+                "Test - loss=%s acc=%s f1=%s roc_auc=%s pr_auc=%s"
+                % (
+                    _metric_str(stage_stats, "loss"),
+                    _metric_str(stage_stats, "acc"),
+                    _metric_str(stage_stats, "f1"),
+                    _metric_str(stage_stats, "roc_auc"),
+                    _metric_str(stage_stats, "pr_auc"),
+                )
+            )
             return
 
         if self.task == "multiclass":
             if stage == "val":
                 progress_write(
                     (
-                        "Rounds %d - train_loss=%.4f train_acc=%.4f train_f1_macro=%.4f "
-                        "val_loss=%.4f val_acc=%.4f val_f1_macro=%.4f"
+                        "Rounds %d - train_loss=%s train_acc=%s train_precision_macro=%s train_recall_macro=%s "
+                        "train_f1_macro=%s train_f1_weighted=%s val_loss=%s val_acc=%s "
+                        "val_precision_macro=%s val_recall_macro=%s val_f1_macro=%s val_f1_weighted=%s"
                     )
                     % (
                         executed_rounds,
-                        train_stats["loss"],
-                        train_stats["acc"],
-                        train_stats["f1_macro"],
-                        stage_stats["loss"],
-                        stage_stats["acc"],
-                        stage_stats["f1_macro"],
+                        _metric_str(train_stats, "loss"),
+                        _metric_str(train_stats, "acc"),
+                        _metric_str(train_stats, "precision_macro"),
+                        _metric_str(train_stats, "recall_macro"),
+                        _metric_str(train_stats, "f1_macro"),
+                        _metric_str(train_stats, "f1_weighted"),
+                        _metric_str(stage_stats, "loss"),
+                        _metric_str(stage_stats, "acc"),
+                        _metric_str(stage_stats, "precision_macro"),
+                        _metric_str(stage_stats, "recall_macro"),
+                        _metric_str(stage_stats, "f1_macro"),
+                        _metric_str(stage_stats, "f1_weighted"),
                     )
                 )
                 return
             progress_write(
-                "Test - loss=%.4f acc=%.4f f1_macro=%.4f"
+                "Test - loss=%s acc=%s precision_macro=%s recall_macro=%s f1_macro=%s f1_weighted=%s"
                 % (
-                    stage_stats["loss"],
-                    stage_stats["acc"],
-                    stage_stats["f1_macro"],
+                    _metric_str(stage_stats, "loss"),
+                    _metric_str(stage_stats, "acc"),
+                    _metric_str(stage_stats, "precision_macro"),
+                    _metric_str(stage_stats, "recall_macro"),
+                    _metric_str(stage_stats, "f1_macro"),
+                    _metric_str(stage_stats, "f1_weighted"),
                 )
             )
             return
@@ -144,29 +177,29 @@ class FLTrainer:
         if stage == "val":
             progress_write(
                 (
-                    "Rounds %d - train_loss=%.4f train_mse=%.4f train_mae=%.4f train_r2=%.4f "
-                    "val_loss=%.4f val_mse=%.4f val_mae=%.4f val_r2=%.4f"
+                    "Rounds %d - train_loss=%s train_mse=%s train_mae=%s train_r2=%s "
+                    "val_loss=%s val_mse=%s val_mae=%s val_r2=%s"
                 )
                 % (
                     executed_rounds,
-                    train_stats["loss"],
-                    train_stats["mse"],
-                    train_stats["mae"],
-                    train_stats["r2"],
-                    stage_stats["loss"],
-                    stage_stats["mse"],
-                    stage_stats["mae"],
-                    stage_stats["r2"],
+                    _metric_str(train_stats, "loss"),
+                    _metric_str(train_stats, "mse"),
+                    _metric_str(train_stats, "mae"),
+                    _metric_str(train_stats, "r2"),
+                    _metric_str(stage_stats, "loss"),
+                    _metric_str(stage_stats, "mse"),
+                    _metric_str(stage_stats, "mae"),
+                    _metric_str(stage_stats, "r2"),
                 )
             )
             return
         progress_write(
-            "Test - loss=%.4f mse=%.4f mae=%.4f r2=%.4f"
+            "Test - loss=%s mse=%s mae=%s r2=%s"
             % (
-                stage_stats["loss"],
-                stage_stats["mse"],
-                stage_stats["mae"],
-                stage_stats["r2"],
+                _metric_str(stage_stats, "loss"),
+                _metric_str(stage_stats, "mse"),
+                _metric_str(stage_stats, "mae"),
+                _metric_str(stage_stats, "r2"),
             )
         )
 
