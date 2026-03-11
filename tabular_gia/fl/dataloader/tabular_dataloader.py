@@ -8,6 +8,8 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 import logging
 
+from configs.dataset.dataset import DatasetConfig
+
 logger = logging.getLogger(__name__)
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
@@ -316,12 +318,41 @@ def _split_clients_dirichlet(
     )
 
 
-def load_dataset(dataset_path: Path, dataset_meta_path: Path, num_clients: int, **kwargs):
+def _cap_client_splits(
+    client_splits: list[tuple[pd.DataFrame, pd.Series]],
+    *,
+    max_client_dataset_examples: int,
+    seed: int,
+) -> list[tuple[pd.DataFrame, pd.Series]]:
+    capped_splits: list[tuple[pd.DataFrame, pd.Series]] = []
+    for client_idx, (X_client, y_client) in enumerate(client_splits):
+        if len(X_client) <= max_client_dataset_examples:
+            capped_splits.append((X_client, y_client))
+            continue
+        rng = np.random.default_rng(seed + (client_idx * 1_000_003))
+        selected = rng.permutation(len(X_client))[:max_client_dataset_examples]
+        selected = np.asarray(selected, dtype=np.int64)
+        X_capped = X_client.iloc[selected].reset_index(drop=True)
+        y_capped = y_client.iloc[selected].reset_index(drop=True)
+        capped_splits.append((X_capped, y_capped))
+    return capped_splits
+
+
+def load_dataset(
+    dataset_cfg: DatasetConfig,
+    num_clients: int,
+    seed: int,
+    encoding_mode: str,
+    max_client_dataset_examples: int | None = None,
+):
     """Load and return dataloaders for a dataset. Kwargs are optional parameters to set dataloader speedups:
         num_workers,
         pin_memory,
         persistent_workers,
     """
+    dataset_path = Path(dataset_cfg.dataset_path)
+    dataset_meta_path = Path(dataset_cfg.dataset_meta_path)
+
     # 1. load meta yaml and parse
     logger.info("Loading dataset config: meta=%s data=%s", dataset_meta_path, dataset_path)
     with open(dataset_meta_path, "r") as f:
@@ -335,6 +366,19 @@ def load_dataset(dataset_path: Path, dataset_meta_path: Path, num_clients: int, 
     else:
         df = pd.read_csv(dataset_path)
     logger.info("Loaded data: rows=%d cols=%d no_header=%s", df.shape[0], df.shape[1], no_header)
+
+    exclude_cols = meta["exclude_cols"] if "exclude_cols" in meta else []
+    if exclude_cols is None:
+        exclude_cols = []
+    if len(exclude_cols) > 0:
+        drop_cols = [str(col) for col in exclude_cols]
+        missing_exclude_cols = [col for col in drop_cols if col not in df.columns]
+        if len(missing_exclude_cols) > 0:
+            raise ValueError(
+                f"exclude_cols contains columns not found in dataset: {missing_exclude_cols}"
+            )
+        df = df.drop(columns=drop_cols)
+        logger.info("Dropped excluded columns: count=%d cols=%s", len(drop_cols), drop_cols)
 
     # 3 perform target split
     target = meta["target"]
@@ -353,10 +397,9 @@ def load_dataset(dataset_path: Path, dataset_meta_path: Path, num_clients: int, 
     logger.info("Task inferred: %s | dropped_missing_targets=%d", task, dropped)
 
     # 4. split into train, val, test at ratios 70 / 15 / 15, stratify on target
-    seed = kwargs["seed"]
-    train_frac = kwargs["train_frac"]
-    val_frac = kwargs["val_frac"]
-    test_frac = kwargs["test_frac"]
+    train_frac = dataset_cfg.train_frac
+    val_frac = dataset_cfg.val_frac
+    test_frac = dataset_cfg.test_frac
     stratify_labels = y if task in ("binary", "multiclass") else None
 
     test_path = meta["has_test_split"]
@@ -432,7 +475,7 @@ def load_dataset(dataset_path: Path, dataset_meta_path: Path, num_clients: int, 
     logger.info("Target classes (train-derived): %s", target_classes if target_classes is not None else "regression")
 
     # 4.3 fit/apply encoders (one-hot) using train only
-    encoding_mode = str(kwargs["encoding_mode"]).strip().lower()
+    encoding_mode = encoding_mode.strip().lower()
     if encoding_mode == "onehot":
         encoder_meta = _fit_encoders(X_train_split, num_cols, cat_cols, missing_values)
         X_train = _apply_encoders(X_train_split, encoder_meta, num_cols, cat_cols)
@@ -459,7 +502,7 @@ def load_dataset(dataset_path: Path, dataset_meta_path: Path, num_clients: int, 
     y_train = y_train.reset_index(drop=True)
 
     # 4.3 split train amongst num_clients
-    partition_strategy = str(kwargs["partition_strategy"]).strip().lower()
+    partition_strategy = dataset_cfg.partition_strategy.strip().lower()
     if partition_strategy == "iid":
         client_splits = _split_clients_iid(X_train, y_train, num_clients, task, seed)
     elif partition_strategy == "dirichlet":
@@ -470,9 +513,9 @@ def load_dataset(dataset_path: Path, dataset_meta_path: Path, num_clients: int, 
             )
             client_splits = _split_clients_iid(X_train, y_train, num_clients, task, seed)
         else:
-            dirichlet_alpha = float(kwargs["dirichlet_alpha"])
-            min_client_samples = int(kwargs["min_client_samples"])
-            max_attempts = int(kwargs["dirichlet_max_attempts"])
+            dirichlet_alpha = dataset_cfg.dirichlet_alpha
+            min_client_samples = dataset_cfg.min_client_samples
+            max_attempts = dataset_cfg.dirichlet_max_attempts
             client_splits = _split_clients_dirichlet(
                 X_train,
                 y_train,
@@ -484,6 +527,23 @@ def load_dataset(dataset_path: Path, dataset_meta_path: Path, num_clients: int, 
             )
     else:
         raise ValueError(f"Unknown partition_strategy '{partition_strategy}'. Use 'iid' or 'dirichlet'.")
+
+    if max_client_dataset_examples is not None and max_client_dataset_examples <= 0:
+        raise ValueError(
+            "max_client_dataset_examples must be > 0 when set, "
+            f"got {max_client_dataset_examples}"
+        )
+
+    if max_client_dataset_examples is not None:
+        client_splits = _cap_client_splits(
+            client_splits,
+            max_client_dataset_examples=max_client_dataset_examples,
+            seed=seed,
+        )
+        logger.info(
+            "Applied fixed client dataset cap: max_client_dataset_examples=%d",
+            max_client_dataset_examples,
+        )
     logger.info(
         "Client splits: strategy=%s clients=%d",
         partition_strategy,
@@ -491,10 +551,10 @@ def load_dataset(dataset_path: Path, dataset_meta_path: Path, num_clients: int, 
     )
 
     # 5. create dataloaders
-    batch_size = kwargs["batch_size"]
-    num_workers = int(kwargs["num_workers"])
-    pin_memory = bool(kwargs["pin_memory"])
-    persistent_workers = bool(kwargs["persistent_workers"])
+    batch_size = dataset_cfg.batch_size
+    num_workers = dataset_cfg.num_workers
+    pin_memory = dataset_cfg.pin_memory
+    persistent_workers = dataset_cfg.persistent_workers
     generator = torch.Generator()
     generator.manual_seed(seed)
 
@@ -626,9 +686,10 @@ def load_dataset(dataset_path: Path, dataset_meta_path: Path, num_clients: int, 
     return client_dataloaders, val_loader, test_loader, feature_schema
 
 if __name__ == "__main__":
+    dataset_cfg = DatasetConfig(dataset_path="data/binary/adult/adult.csv", dataset_meta_path="data/binary/adult/adult.yaml")
     client_dataloaders, val_loader, test_loader, feature_schema = load_dataset(
-        Path("data/binary/adult/adult.csv"),
-        Path("data/binary/adult/adult.yaml"),
-        10,
+        dataset_cfg,
+        num_clients=10,
+        seed=42,
         encoding_mode="onehot",
     )

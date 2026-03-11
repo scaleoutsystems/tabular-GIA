@@ -3,7 +3,7 @@
 #   - default: fixed values applied to every run
 #   - grid: sweep dimensions (lists only)
 # - Only values from grid appear in run overrides.
-# INFO: Go to the config.yaml files for full information on parameters.
+# INFO: Go to the config.py files for full information on parameters.
 
 base:
   default:
@@ -39,12 +39,11 @@ model:
     dropout: 0.0
     activation: relu
     presets:
-      small: {arch: mlp, d_hidden: 64, num_layers: 2, norm: layernorm, dropout: 0.0, activation: gelu}
+      small:  {arch: mlp, d_hidden: 64, num_layers: 2, norm: layernorm, dropout: 0.0, activation: gelu}
       medium: {arch: mlp, d_hidden: 128, num_layers: 3, norm: layernorm, dropout: 0.1, activation: gelu}
-      large: {arch: mlp, d_hidden: 256, num_layers: 4, norm: layernorm, dropout: 0.2, activation: gelu}
+      large:  {arch: mlp, d_hidden: 256, num_layers: 4, norm: layernorm, dropout: 0.2, activation: gelu}
       fttransformer: {arch: fttransformer}
   grid:
-    preset: [small, fttransformer]
     # Explicit mode example:
     # preset: null
     # d_hidden: [64, 128, 256]
@@ -59,17 +58,18 @@ fl:
       local_steps: 1
       local_epochs: 1
       num_clients: 10
-      min_exposure: 10.0
+      min_exposure: 25.0
       optimizer: MetaSGD
       lr: 0.01
     grid:
 
   fedavg:
     default:
-      local_steps: 1
+      local_steps: "all"
       local_epochs: 1
+      max_client_dataset_examples: 256
       num_clients: 3
-      min_exposure: 10.0
+      min_exposure: 25.0
       optimizer: MetaAdam
       lr: 0.01
     grid:
@@ -78,10 +78,12 @@ gia:
   default:
     attack_mode: round_checkpoint
     fixed_batch_k: 1 # only used when attack_mode is fixed_batch
-    attack_schedule: exposure
+    attack_schedule: auto
+    auto_checkpoints: 6
     attack_exposure_milestones: [0.0, 0.5, 1.0, 2.0, 5.0, 10.0]
-    label_known: true
-    attack_lr: 0.03
-    at_iterations: 1
-    data_extension: GiaTabularExtension
+    invertingconfig:
+      label_known: true
+      attack_lr: 0.03
+      at_iterations: 10000
+      data_extension: GiaTabularExtension
   grid:

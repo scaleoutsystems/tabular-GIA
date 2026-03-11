@@ -5,6 +5,8 @@ from copy import deepcopy
 import torch
 from torch import nn
 
+from configs.model.model import ModelConfig
+
 
 class ModelWrapper(nn.Module):
     def __init__(self, *, task: str) -> None:
@@ -27,32 +29,29 @@ class ModelWrapper(nn.Module):
         self.load_state_dict(state_dict)
 
     @staticmethod
-    def resolve_model_cfg(model_cfg: dict) -> tuple[str | None, dict]:
-        cfg = deepcopy(model_cfg)
-        if "preset" not in cfg:
-            return None, cfg
+    def resolve_model_cfg(model_cfg: ModelConfig) -> dict:
+        cfg = deepcopy(model_cfg.to_dict())
         preset_name = cfg["preset"]
         if preset_name is not None:
             presets = cfg["presets"]
             if preset_name not in presets:
                 raise ValueError(f"Model preset '{preset_name}' not found in model config.")
-            cfg = deepcopy(presets[preset_name])
-            return preset_name, cfg
+            return deepcopy(presets[preset_name])
         cfg.pop("preset")
         cfg.pop("presets")
-        return None, cfg
+        return cfg
 
     @classmethod
-    def infer_encoding_mode(cls, model_cfg: dict) -> str:
-        _, cfg = cls.resolve_model_cfg(model_cfg)
+    def infer_encoding_mode(cls, model_cfg: ModelConfig) -> str:
+        cfg = cls.resolve_model_cfg(model_cfg)
         arch = str(cfg["arch"]).strip().lower()
         if arch == "fttransformer":
             return "ordinal"
         return "onehot"
 
     @classmethod
-    def from_config(cls, model_cfg: dict, feature_schema: dict) -> "ModelWrapper":
-        _, cfg = cls.resolve_model_cfg(model_cfg)
+    def from_config(cls, model_cfg: ModelConfig, feature_schema: dict) -> "ModelWrapper":
+        cfg = cls.resolve_model_cfg(model_cfg)
 
         task = feature_schema["task"]
         if task == "multiclass":

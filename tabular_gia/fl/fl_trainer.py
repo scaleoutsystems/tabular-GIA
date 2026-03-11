@@ -7,6 +7,8 @@ from typing import Callable
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
+from configs.fl.fedavg import FedAvgConfig
+from configs.fl.fedsgd import FedSGDConfig
 from fl.metrics.fl_metrics import eval, progress_write, round_bar
 from leakpro.fl_utils.gia_optimizers import MetaAdam, MetaSGD
 from leakpro.fl_utils.gia_train import train, train_nostep
@@ -34,13 +36,15 @@ class FLCallbacks:
 class FLTrainer:
     def __init__(
         self,
-        fl_cfg: dict,
+        fl_cfg: FedAvgConfig | FedSGDConfig,
+        batch_size: int,
         client_dataloaders: list[DataLoader],
         val_loader: DataLoader,
         test_loader: DataLoader,
         callbacks: FLCallbacks,
     ) -> None:
         self.fl_cfg = fl_cfg
+        self.batch_size = batch_size
         self.client_dataloaders = client_dataloaders
         self.val_loader = val_loader
         self.test_loader = test_loader
@@ -264,18 +268,18 @@ class FedAvgTrainer(FLTrainer):
     def fit(self, model_wrapper) -> FLTrainResult:
         self._set_model(model_wrapper)
         cfg = self.fl_cfg
-        local_steps_raw = cfg["local_steps"]
+        local_steps_raw = cfg.local_steps
         local_steps_all = isinstance(local_steps_raw, str) and local_steps_raw.strip().lower() == "all"
-        local_steps = None if local_steps_all else max(1, int(local_steps_raw))
-        local_epochs = max(1, int(cfg["local_epochs"]))
-        batch_size = int(cfg["batch_size"])
-        lr = float(cfg["lr"])
-        optimizer_name = cfg["optimizer"]
+        local_steps = None if local_steps_all else max(1, local_steps_raw)
+        local_epochs = max(1, cfg.local_epochs)
+        batch_size = self.batch_size
+        lr = cfg.lr
+        optimizer_name = cfg.optimizer
         num_clients = len(self.client_dataloaders)
 
         client_n_eff = self._client_effective_sizes(batch_size)
         n_max_eff = max(client_n_eff) if client_n_eff else 1
-        min_exposure = float(cfg["min_exposure"])
+        min_exposure = cfg.min_exposure
         if min_exposure <= 0:
             raise ValueError(f"min_exposure must be > 0, got {min_exposure}")
         if local_steps_all:
@@ -286,7 +290,7 @@ class FedAvgTrainer(FLTrainer):
             num_rounds = max(1, math.ceil((min_exposure * n_max_eff) / samples_per_round))
 
         if self.callbacks.attack_init_fn is not None:
-            self.callbacks.attack_init_fn(int(num_rounds))
+            self.callbacks.attack_init_fn(num_rounds)
 
         logger.info(
             "Round budget: rounds=%d min_exposure=%.6f n_max_eff=%d samples_per_round=%s",
@@ -422,22 +426,22 @@ class FedSGDTrainer(FLTrainer):
     def fit(self, model_wrapper) -> FLTrainResult:
         self._set_model(model_wrapper)
         cfg = self.fl_cfg
-        local_steps = max(1, int(cfg["local_steps"]))
-        local_epochs = max(1, int(cfg["local_epochs"]))
-        batch_size = int(cfg["batch_size"])
-        lr = float(cfg["lr"])
+        local_steps = max(1, cfg.local_steps)
+        local_epochs = max(1, cfg.local_epochs)
+        batch_size = self.batch_size
+        lr = cfg.lr
         num_clients = len(self.client_dataloaders)
 
         client_n_eff = self._client_effective_sizes(batch_size)
         n_max_eff = max(client_n_eff) if client_n_eff else 1
         samples_per_round = max(1, local_steps * batch_size * local_epochs)
-        min_exposure = float(cfg["min_exposure"])
+        min_exposure = cfg.min_exposure
         if min_exposure <= 0:
             raise ValueError(f"min_exposure must be > 0, got {min_exposure}")
         num_rounds = max(1, math.ceil((min_exposure * n_max_eff) / samples_per_round))
 
         if self.callbacks.attack_init_fn is not None:
-            self.callbacks.attack_init_fn(int(num_rounds))
+            self.callbacks.attack_init_fn(num_rounds)
 
         logger.info(
             "Round budget: rounds=%d min_exposure=%.6f n_max_eff=%d samples_per_round=%d",
@@ -547,7 +551,8 @@ class FedSGDTrainer(FLTrainer):
 
 def build_fl_trainer(
     protocol: str,
-    fl_cfg: dict,
+    fl_cfg: FedAvgConfig | FedSGDConfig,
+    batch_size: int,
     client_dataloaders: list[DataLoader],
     val_loader: DataLoader,
     test_loader: DataLoader,
@@ -556,6 +561,7 @@ def build_fl_trainer(
     if protocol == "fedsgd":
         return FedSGDTrainer(
             fl_cfg=fl_cfg,
+            batch_size=batch_size,
             client_dataloaders=client_dataloaders,
             val_loader=val_loader,
             test_loader=test_loader,
@@ -564,6 +570,7 @@ def build_fl_trainer(
     if protocol == "fedavg":
         return FedAvgTrainer(
             fl_cfg=fl_cfg,
+            batch_size=batch_size,
             client_dataloaders=client_dataloaders,
             val_loader=val_loader,
             test_loader=test_loader,

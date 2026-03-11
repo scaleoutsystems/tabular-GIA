@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 import math
 from copy import deepcopy
 from pathlib import Path
@@ -8,6 +9,9 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
+from configs.fl.fedavg import FedAvgConfig
+from configs.fl.fedsgd import FedSGDConfig
+from configs.gia.gia import GiaConfig
 from leakpro.attacks.gia_attacks.invertinggradients import InvertingConfig, InvertingGradients
 from leakpro.fl_utils.data_utils import GiaTabularExtension
 from leakpro.fl_utils.gia_optimizers import MetaAdam, MetaSGD
@@ -25,25 +29,25 @@ class AttackScheduler:
         self,
         *,
         protocol: str,
-        gia_cfg: dict,
-        fl_cfg: dict,
-        dataset_cfg: dict,
+        gia_cfg: GiaConfig,
+        fl_cfg: FedAvgConfig | FedSGDConfig,
+        seed: int,
         client_dataloaders: list[DataLoader],
     ) -> None:
         self.protocol = protocol
         self.gia_cfg = gia_cfg
         self.fl_cfg = fl_cfg
-        self.dataset_cfg = dataset_cfg
+        self.seed = seed
         self.client_dataloaders = client_dataloaders
 
-        self.attack_mode = str(gia_cfg["attack_mode"]).strip().lower()
-        self.attack_schedule = str(gia_cfg["attack_schedule"]).strip().lower()
-        self.fixed_batch_k = int(gia_cfg["fixed_batch_k"])
+        self.attack_mode = gia_cfg.attack_mode.strip().lower()
+        self.attack_schedule = gia_cfg.attack_schedule.strip().lower()
+        self.fixed_batch_k = gia_cfg.fixed_batch_k
 
         self.exposure_include_round1_preagg = False
         self.exposure_targets: list[float] = []
         if self.attack_schedule == "exposure":
-            raw = gia_cfg["attack_exposure_milestones"]
+            raw = gia_cfg.attack_exposure_milestones
             self.exposure_include_round1_preagg = any(float(m) == 0.0 for m in raw)
             self.exposure_targets = sorted({float(m) for m in raw if float(m) > 0.0})
 
@@ -66,13 +70,26 @@ class AttackScheduler:
                 r <<= 1
             return rounds
         if self.attack_schedule == "fixed":
-            raw = self.gia_cfg["attack_rounds"]
+            raw = self.gia_cfg.attack_rounds
             return {int(r) for r in raw if 1 <= int(r) <= total_rounds}
         if self.attack_schedule in {"log", "logspace"}:
-            count = int(self.gia_cfg["attack_num_checkpoints"])
+            count = self.gia_cfg.attack_num_checkpoints
             if count == 1:
                 return {total_rounds}
             rounds = {int(round(math.exp((i / (count - 1)) * math.log(total_rounds)))) for i in range(count)}
+            return {min(total_rounds, max(1, r)) for r in rounds}
+        if self.attack_schedule == "auto":
+            count = self.gia_cfg.auto_checkpoints
+            if count <= 0:
+                raise ValueError(f"auto_checkpoints must be > 0, got {count}")
+            if count >= total_rounds:
+                return set(range(1, total_rounds + 1))
+            if count == 1:
+                return {total_rounds}
+            rounds = {
+                1 + ((i * (total_rounds - 1)) // (count - 1))
+                for i in range(count)
+            }
             return {min(total_rounds, max(1, r)) for r in rounds}
         if self.attack_schedule == "exposure":
             return set()
@@ -125,10 +142,10 @@ class AttackScheduler:
         return DataLoader(fixed_batch_ds, batch_size=int(client_loader.batch_size), shuffle=False)
 
     def _build_fixed_batch_loaders(self) -> None:
-        local_steps_raw = self.fl_cfg["local_steps"]
+        local_steps_raw = self.fl_cfg.local_steps
         local_steps_all = isinstance(local_steps_raw, str) and local_steps_raw.strip().lower() == "all"
         local_steps = None if local_steps_all else max(1, int(local_steps_raw))
-        base_seed = int(self.dataset_cfg["seed"])
+        base_seed = self.seed
 
         for client_idx, client_loader in enumerate(self.client_dataloaders):
             batch_size = int(client_loader.batch_size)
@@ -277,9 +294,9 @@ class AttackEngine:
         self,
         *,
         protocol: str,
-        gia_cfg: dict,
-        fl_cfg: dict,
-        dataset_cfg: dict,
+        gia_cfg: GiaConfig,
+        fl_cfg: FedAvgConfig | FedSGDConfig,
+        seed: int,
         feature_schema: dict,
         client_dataloaders: list[DataLoader],
         criterion: torch.nn.Module,
@@ -289,19 +306,19 @@ class AttackEngine:
             protocol=protocol,
             gia_cfg=gia_cfg,
             fl_cfg=fl_cfg,
-            dataset_cfg=dataset_cfg,
+            seed=seed,
             client_dataloaders=client_dataloaders,
         )
-        lr = float(fl_cfg["lr"])
-        optimizer_name = fl_cfg["optimizer"]
+        lr = fl_cfg.lr
+        optimizer_name = fl_cfg.optimizer
         optimizer = MetaAdam(lr=lr) if optimizer_name == "MetaAdam" else MetaSGD(lr=lr)
-        invertingconfig = dict(gia_cfg["invertingconfig"])
+        invertingconfig = asdict(gia_cfg.invertingconfig)
         invertingconfig.pop("data_extension", None)
         attack_cfg_base = InvertingConfig(
             optimizer=optimizer,
             criterion=criterion,
             data_extension=GiaTabularExtension(),
-            epochs=fl_cfg["local_epochs"],
+            epochs=fl_cfg.local_epochs,
             **invertingconfig,
         )
         if protocol == "fedsgd":

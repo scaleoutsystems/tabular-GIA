@@ -9,6 +9,7 @@ import numpy as np
 from tabular_gia.fl.metrics.fl_metrics import FL_METRIC_FIELDS
 from tabular_gia.metrics.tabular_metrics import ATTACK_METRIC_FIELDS
 
+# attacks.csv
 ATTACKS_CSV_FIELDS = (
     "attack_id",
     "round",
@@ -25,42 +26,39 @@ ATTACKS_CSV_FIELDS = (
     *ATTACK_METRIC_FIELDS,
 )
 
+# fl.csv
+EXPOSURE_FIELDS = ("exp_min", "exp_avg", "exp_max")
+FL_CSV_FIELDS = ("phase", "round", *EXPOSURE_FIELDS, *(f"{split}_{metric}" for split in ("train", "val", "test") for metric in FL_METRIC_FIELDS))
 
-ROUNDS_SUMMARY_CSV_FIELDS = (
-    "round",
-    "num_clients",
-    "total_rows",
-    "exp_min",
-    "exp_avg",
-    "exp_max",
-    *ATTACK_METRIC_FIELDS,
-)
+# rounds_summary.csv
+ROUNDS_SUMMARY_CSV_FIELDS = ("round", "num_clients", "total_rows", *EXPOSURE_FIELDS, *ATTACK_METRIC_FIELDS)
 
-RUN_SUMMARY_CSV_FIELDS = (
-    "num_rounds",
-    "total_rows",
-    *ATTACK_METRIC_FIELDS,
-)
+# run_summary.csv
+RUN_SUMMARY_CSV_FIELDS = ("num_rounds", "total_rows", *ATTACK_METRIC_FIELDS)
 
-FL_CSV_FIELDS = (
+# sweep_results_per_seed.csv
+SWEEP_RESULTS_PER_SEED_CSV_FIELDS = ("run_id", "seed", *RUN_SUMMARY_CSV_FIELDS)
+
+# sweep_results.csv
+SWEEP_RESULTS_CSV_FIELDS = ("run_id", "num_seeds", *RUN_SUMMARY_CSV_FIELDS)
+
+# *_stats.csv
+STATS_SUFFIXES = ("mean", "std")
+
+FL_STATS_CSV_FIELDS = (
     "phase",
     "round",
-    "exp_min",
-    "exp_avg",
-    "exp_max",
-    *(f"{split}_{metric}" for split in ("train", "val", "test") for metric in FL_METRIC_FIELDS),
+    *(f"{metric}_{suffix}" for metric in EXPOSURE_FIELDS for suffix in STATS_SUFFIXES),
+    *(f"{metric}_{suffix}" for metric in (f"{split}_{metric}" for split in ("train", "val", "test") for metric in FL_METRIC_FIELDS) for suffix in STATS_SUFFIXES),
 )
-
-SWEEP_RESULTS_PER_SEED_CSV_FIELDS = (
-    "run_id",
-    "seed",
-    *RUN_SUMMARY_CSV_FIELDS,
+ROUNDS_SUMMARY_STATS_CSV_FIELDS = (
+    "round",
+    *(f"{metric}_{suffix}" for metric in EXPOSURE_FIELDS for suffix in STATS_SUFFIXES),
+    *(f"{metric}_{suffix}" for metric in ATTACK_METRIC_FIELDS for suffix in STATS_SUFFIXES),
 )
-
-SWEEP_RESULTS_CSV_FIELDS = (
-    "run_id",
+RUN_SUMMARY_STATS_CSV_FIELDS = (
     "num_seeds",
-    *RUN_SUMMARY_CSV_FIELDS,
+    *(f"{metric}_{suffix}" for metric in ATTACK_METRIC_FIELDS for suffix in STATS_SUFFIXES),
 )
 
 
@@ -161,6 +159,9 @@ class SeedAggregationResult:
     attack_rows: list[dict]
     round_summaries: list[dict]
     run_summary: dict | None
+    fl_rows_stats: list[dict]
+    round_summaries_stats: list[dict]
+    run_summary_stats: dict | None
 
 
 class SeedRunResult(Protocol):
@@ -248,14 +249,72 @@ class SeedSummaryBuilder:
         aggregated.sort(key=lambda row: tuple(_sort_value(row.get(k, "")) for k in group_keys))
         return aggregated
 
+    def _build_stats_rows(
+        self,
+        *,
+        rows: list[dict],
+        group_keys: tuple[str, ...],
+        int_group_fields: set[str],
+        metric_fields: tuple[str, ...],
+    ) -> list[dict]:
+        if not rows:
+            return []
+
+        grouped: dict[tuple[str, ...], list[dict]] = {}
+        for row in rows:
+            key = tuple(str(row.get(k, "")) for k in group_keys)
+            grouped.setdefault(key, []).append(row)
+
+        stats_rows: list[dict] = []
+        for key, bucket in grouped.items():
+            out: dict[str, object] = {}
+            for i, group_key in enumerate(group_keys):
+                raw_value = key[i]
+                if group_key in int_group_fields:
+                    parsed = self._to_float(raw_value)
+                    out[group_key] = int(parsed) if parsed is not None else -1
+                else:
+                    out[group_key] = raw_value
+
+            for metric in metric_fields:
+                values: list[float] = []
+                for row in bucket:
+                    parsed = self._to_float(row.get(metric))
+                    if parsed is not None:
+                        values.append(parsed)
+
+                if not values:
+                    out[f"{metric}_mean"] = float("nan")
+                    out[f"{metric}_std"] = float("nan")
+                    continue
+
+                values_np = np.array(values, dtype=float)
+                out[f"{metric}_mean"] = float(np.mean(values_np))
+                out[f"{metric}_std"] = float(np.std(values_np, ddof=1)) if len(values) > 1 else 0.0
+
+            stats_rows.append(out)
+
+        def _sort_value(v: object):
+            parsed = self._to_float(v)
+            if parsed is not None:
+                return (0, parsed)
+            return (1, str(v))
+
+        stats_rows.sort(key=lambda row: tuple(_sort_value(row.get(k, "")) for k in group_keys))
+        return stats_rows
+
     def build_seed_aggregate(self, run_results: list[SeedRunResult]) -> SeedAggregationResult:
         fl_rows_raw: list[dict] = []
         attack_rows_raw: list[dict] = []
         round_rows_raw: list[dict] = []
+        run_summaries_raw: list[dict] = []
         for result in run_results:
             fl_rows_raw.extend(result.fl_rows)
             attack_rows_raw.extend(result.attack_rows)
             round_rows_raw.extend(result.round_summaries)
+            run_summary = summarize_run(result.round_summaries)
+            if run_summary is not None:
+                run_summaries_raw.append(run_summary)
 
         fl_rows_non_final = self._aggregate_rows(
             rows=[row for row in fl_rows_raw if str(row.get("phase", "")).strip() != "final_test"],
@@ -275,6 +334,29 @@ class SeedSummaryBuilder:
             row["round"] = -1
         fl_rows = fl_rows_non_final + fl_rows_final
         fl_rows.sort(key=lambda row: (str(row.get("phase", "")), float(self._to_float(row.get("round")) or 0.0)))
+
+        fl_rows_stats_non_final = self._build_stats_rows(
+            rows=[row for row in fl_rows_raw if str(row.get("phase", "")).strip() != "final_test"],
+            group_keys=("phase", "round"),
+            int_group_fields={"round"},
+            metric_fields=(
+                *EXPOSURE_FIELDS,
+                *(f"{split}_{metric}" for split in ("train", "val", "test") for metric in FL_METRIC_FIELDS),
+            ),
+        )
+        fl_rows_stats_final = self._build_stats_rows(
+            rows=[row for row in fl_rows_raw if str(row.get("phase", "")).strip() == "final_test"],
+            group_keys=("phase",),
+            int_group_fields=set(),
+            metric_fields=(
+                *EXPOSURE_FIELDS,
+                *(f"{split}_{metric}" for split in ("train", "val", "test") for metric in FL_METRIC_FIELDS),
+            ),
+        )
+        for row in fl_rows_stats_final:
+            row["round"] = -1
+        fl_rows_stats = fl_rows_stats_non_final + fl_rows_stats_final
+        fl_rows_stats.sort(key=lambda row: (str(row.get("phase", "")), float(self._to_float(row.get("round")) or 0.0)))
 
         attack_rows = self._aggregate_rows(
             rows=attack_rows_raw,
@@ -300,9 +382,29 @@ class SeedSummaryBuilder:
         if run_summary is not None:
             run_summary = {field: run_summary[field] for field in RUN_SUMMARY_CSV_FIELDS if field in run_summary}
 
+        round_summaries_stats = self._build_stats_rows(
+            rows=round_rows_raw,
+            group_keys=("round",),
+            int_group_fields={"round"},
+            metric_fields=(*EXPOSURE_FIELDS, *ATTACK_METRIC_FIELDS),
+        )
+
+        run_summary_stats: dict | None = None
+        run_summary_stats_rows = self._build_stats_rows(
+            rows=run_summaries_raw,
+            group_keys=(),
+            int_group_fields=set(),
+            metric_fields=ATTACK_METRIC_FIELDS,
+        )
+        if run_summary_stats_rows:
+            run_summary_stats = {"num_seeds": len(run_summaries_raw), **run_summary_stats_rows[0]}
+
         return SeedAggregationResult(
             fl_rows=fl_rows,
             attack_rows=attack_rows,
             round_summaries=round_summaries,
             run_summary=run_summary,
+            fl_rows_stats=fl_rows_stats,
+            round_summaries_stats=round_summaries_stats,
+            run_summary_stats=run_summary_stats,
         )
