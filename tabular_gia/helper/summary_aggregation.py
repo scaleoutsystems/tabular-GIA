@@ -43,7 +43,7 @@ SWEEP_RESULTS_PER_SEED_CSV_FIELDS = ("run_id", "seed", *RUN_SUMMARY_CSV_FIELDS)
 SWEEP_RESULTS_CSV_FIELDS = ("run_id", "num_seeds", *RUN_SUMMARY_CSV_FIELDS)
 
 # *_stats.csv
-STATS_SUFFIXES = ("mean", "std")
+STATS_SUFFIXES = ("mean", "std", "ci95")
 
 FL_STATS_CSV_FIELDS = (
     "phase",
@@ -286,11 +286,17 @@ class SeedSummaryBuilder:
                 if not values:
                     out[f"{metric}_mean"] = float("nan")
                     out[f"{metric}_std"] = float("nan")
+                    out[f"{metric}_ci95"] = float("nan")
                     continue
 
                 values_np = np.array(values, dtype=float)
-                out[f"{metric}_mean"] = float(np.mean(values_np))
-                out[f"{metric}_std"] = float(np.std(values_np, ddof=1)) if len(values) > 1 else 0.0
+                mean_value = float(np.mean(values_np))
+                std_value = float(np.std(values_np, ddof=1)) if len(values) > 1 else 0.0
+                # 95% CI half-width using normal approximation: 1.96 * std / sqrt(n)
+                ci95_value = float(1.96 * std_value / math.sqrt(len(values))) if len(values) > 1 else float("nan")
+                out[f"{metric}_mean"] = mean_value
+                out[f"{metric}_std"] = std_value
+                out[f"{metric}_ci95"] = ci95_value
 
             stats_rows.append(out)
 
