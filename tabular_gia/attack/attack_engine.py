@@ -173,6 +173,7 @@ class AttackRunner:
         mismatch_label: str,
         attack_cfg_base: InvertingConfig,
         feature_schema: dict,
+        seed: int,
         results_dir: Path,
         attack_mode: str,
     ) -> None:
@@ -180,6 +181,7 @@ class AttackRunner:
         self.mismatch_label = mismatch_label
         self.attack_cfg_base = attack_cfg_base
         self.feature_schema = feature_schema
+        self.seed = int(seed)
         self.debug_dir = results_dir / "debug"
         self.debug_dir.mkdir(parents=True, exist_ok=True)
         self.attack_mode = attack_mode
@@ -250,7 +252,13 @@ class AttackRunner:
         results_path = self.debug_dir / artifact_name
 
         orig_tensor, recon_tensor, label_tensor = prepare_tensors_for_metrics(attacker, self.feature_schema, client_idx)
-        reconstruction_metrics = compute_reconstruction_metrics(orig_tensor, recon_tensor, self.feature_schema, client_idx)
+        reconstruction_metrics = compute_reconstruction_metrics(
+            orig_tensor,
+            recon_tensor,
+            self.feature_schema,
+            client_idx,
+            random_baseline_seed=self.seed,
+        )
         write_debug_reconstruction_txt(
             results_path,
             orig_tensor,
@@ -332,6 +340,7 @@ class AttackEngine:
             mismatch_label=mismatch_label,
             attack_cfg_base=attack_cfg_base,
             feature_schema=feature_schema,
+            seed=seed,
             results_dir=results_dir,
             attack_mode=self.scheduler.attack_mode,
         )

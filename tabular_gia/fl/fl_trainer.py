@@ -245,6 +245,11 @@ class FLTrainer:
             exp_min = float("nan")
             exp_avg = float("nan")
             exp_max = float("nan")
+
+        tested_round = int(executed_rounds)
+        tested_exp_min = float(exp_min)
+        tested_exp_avg = float(exp_avg)
+        tested_exp_max = float(exp_max)
         if self.best_state_dict is not None:
             self.model_wrapper.restore_state(self.best_state_dict)
             logger.info(
@@ -252,14 +257,19 @@ class FLTrainer:
                 self.best_round,
                 self.best_val_loss,
             )
+            tested_round = int(self.best_round)
+            best_checkpoint = next((row for row in reversed(self.fl_rows) if row["phase"].strip() == "checkpoint" and row["round"] == tested_round), None)
+            if best_checkpoint is not None:
+                tested_exp_min = float(best_checkpoint["exp_min"])
+                tested_exp_avg = float(best_checkpoint["exp_avg"])
+                tested_exp_max = float(best_checkpoint["exp_max"])
         test_stats = self._eval([self.test_loader])
-        tested_round = int(self.best_round) if self.best_state_dict is not None else int(executed_rounds)
         self._save_metrics(
             phase="final_test",
             round_idx=tested_round,
-            exp_min=exp_min,
-            exp_avg=exp_avg,
-            exp_max=exp_max,
+            exp_min=tested_exp_min,
+            exp_avg=tested_exp_avg,
+            exp_max=tested_exp_max,
             metrics_by_stage={"test": test_stats},
         )
         self._log("test", executed_rounds, None, test_stats)

@@ -22,6 +22,12 @@ ATTACK_METRIC_FIELDS = (
     "gain_num_over_prior",
     "prior_cat_acc",
     "gain_cat_over_prior",
+    "random_tableak_acc",
+    "gain_tableak_over_random",
+    "random_num_acc",
+    "gain_num_over_random",
+    "random_cat_acc",
+    "gain_cat_over_random",
     "emr",
     "emr_90",
     "emr_80",
@@ -109,6 +115,7 @@ def compute_reconstruction_metrics(
     recon_tensor: Tensor,
     feature_schema: Dict,
     client_idx: int,
+    random_baseline_seed: int,
 ) -> Dict:
     """Compute per-row and aggregate reconstruction metrics."""
     num_cols = feature_schema.get("num_cols", [])
@@ -148,6 +155,14 @@ def compute_reconstruction_metrics(
         per_row_metrics["cat_acc"] = cat_acc
 
     prior_metrics = _prior_baseline_metrics(orig_tensor, feature_schema, client_idx, num_std)
+    random_metrics = _random_baseline_metrics(
+        orig_tensor,
+        feature_schema,
+        client_idx,
+        num_std,
+        n_trials=128,
+        seed=int(random_baseline_seed),
+    )
     distribution_metrics = _distribution_confidence_metrics(recon_tensor, feature_schema, client_idx)
 
     aggregate_metrics = {
@@ -162,6 +177,8 @@ def compute_reconstruction_metrics(
         "row_count": int(orig_tensor.shape[0]),
         "prior_tableak_acc": prior_metrics["prior_tableak_acc"],
         "gain_tableak_over_prior": float(np.nanmean(tableak_acc)) - prior_metrics["prior_tableak_acc"],
+        "random_tableak_acc": random_metrics["random_tableak_acc"],
+        "gain_tableak_over_random": float(np.nanmean(tableak_acc)) - random_metrics["random_tableak_acc"],
         "dist_conf": distribution_metrics["dist_conf"],
     }
     if has_num:
@@ -169,6 +186,9 @@ def compute_reconstruction_metrics(
         if "prior_num_acc" in prior_metrics:
             aggregate_metrics["prior_num_acc"] = prior_metrics["prior_num_acc"]
             aggregate_metrics["gain_num_over_prior"] = aggregate_metrics["num_acc"] - prior_metrics["prior_num_acc"]
+        if "random_num_acc" in random_metrics:
+            aggregate_metrics["random_num_acc"] = random_metrics["random_num_acc"]
+            aggregate_metrics["gain_num_over_random"] = aggregate_metrics["num_acc"] - random_metrics["random_num_acc"]
         aggregate_metrics["num_dist_conf"] = distribution_metrics["num_dist_conf"]
         aggregate_metrics["num_within_1std"] = distribution_metrics["num_within_1std"]
         aggregate_metrics["num_within_2std"] = distribution_metrics["num_within_2std"]
@@ -177,6 +197,9 @@ def compute_reconstruction_metrics(
         if "prior_cat_acc" in prior_metrics:
             aggregate_metrics["prior_cat_acc"] = prior_metrics["prior_cat_acc"]
             aggregate_metrics["gain_cat_over_prior"] = aggregate_metrics["cat_acc"] - prior_metrics["prior_cat_acc"]
+        if "random_cat_acc" in random_metrics:
+            aggregate_metrics["random_cat_acc"] = random_metrics["random_cat_acc"]
+            aggregate_metrics["gain_cat_over_random"] = aggregate_metrics["cat_acc"] - random_metrics["random_cat_acc"]
         aggregate_metrics["cat_dist_conf"] = distribution_metrics["cat_dist_conf"]
 
     return {
@@ -276,6 +299,125 @@ def _prior_baseline_metrics(
         metrics["prior_num_acc"] = float(np.mean(prior_num_acc))
     if len(cat_cols) > 0:
         metrics["prior_cat_acc"] = float(np.mean(prior_cat_acc))
+    return metrics
+
+
+def _random_baseline_tensor(
+    orig_tensor: Tensor,
+    feature_schema: Dict,
+    rng: np.random.Generator,
+) -> Tensor:
+    """Sample an uninformed random reconstruction batch in the same feature space."""
+    num_cols = feature_schema.get("num_cols", [])
+    num_count = len(num_cols)
+    total_dim = orig_tensor.shape[1]
+    encoding_mode = str(feature_schema.get("encoding_mode", "onehot")).strip().lower()
+
+    rand_tensor = torch.zeros_like(orig_tensor)
+
+    # Numeric: uniform over global train support.
+    if num_count > 0:
+        mins = np.asarray(feature_schema.get("train_num_min", []), dtype=np.float32)[:num_count]
+        maxs = np.asarray(feature_schema.get("train_num_max", []), dtype=np.float32)[:num_count]
+
+        if len(mins) != num_count or len(maxs) != num_count:
+            raise ValueError("Missing or invalid train_num_min/train_num_max in feature_schema.")
+
+        maxs = np.maximum(maxs, mins + 1e-8)
+        sampled_num = rng.uniform(
+            low=mins[None, :],
+            high=maxs[None, :],
+            size=(orig_tensor.shape[0], num_count),
+        ).astype(np.float32)
+
+        rand_tensor[:, :num_count] = torch.as_tensor(
+            sampled_num,
+            dtype=orig_tensor.dtype,
+            device=orig_tensor.device,
+        )
+
+    # Categorical: uniform over valid categories.
+    cat_groups = _iter_cat_groups(feature_schema, total_dim, num_count)
+    for group in cat_groups:
+        idxs = group["indices"]
+        cats = group["cats"]
+        n_cats = len(cats)
+        if n_cats <= 0:
+            continue
+
+        draws = rng.integers(0, n_cats, size=orig_tensor.shape[0])
+
+        if encoding_mode == "ordinal" or len(idxs) == 1:
+            rand_tensor[:, idxs[0]] = torch.as_tensor(
+                draws,
+                dtype=orig_tensor.dtype,
+                device=orig_tensor.device,
+            )
+        else:
+            onehot = np.zeros((orig_tensor.shape[0], n_cats), dtype=np.float32)
+            onehot[np.arange(orig_tensor.shape[0]), draws] = 1.0
+            rand_tensor[:, idxs] = torch.as_tensor(
+                onehot,
+                dtype=orig_tensor.dtype,
+                device=orig_tensor.device,
+            )
+
+    return rand_tensor
+
+
+def _random_baseline_metrics(
+    orig_tensor: Tensor,
+    feature_schema: Dict,
+    client_idx: int,
+    num_std: np.ndarray | None,
+    *,
+    n_trials: int = 256,
+    seed: int = 0,
+) -> Dict[str, float]:
+    """Compute random baseline reconstruction scores by Monte Carlo sampling."""
+    num_cols = feature_schema.get("num_cols", [])
+    cat_cols = feature_schema.get("cat_cols", [])
+    encoding_mode = str(feature_schema.get("encoding_mode", "onehot")).strip().lower()
+
+    rng = np.random.default_rng(seed + 1009 * client_idx + 17 * orig_tensor.shape[0])
+
+    tableak_scores: list[float] = []
+    num_scores: list[float] = []
+    cat_scores: list[float] = []
+
+    for _ in range(n_trials):
+        rand_tensor = _random_baseline_tensor(orig_tensor, feature_schema, rng)
+
+        # Random rows differ, so matching matters here.
+        _, rand_tensor, _ = _apply_matching(orig_tensor, rand_tensor, None)
+
+        rand_num_acc, rand_cat_acc, rand_tableak = _tab_leak_accuracy(
+            orig_tensor,
+            rand_tensor,
+            num_cols,
+            cat_cols,
+            feature_schema.get("cat_categories", {}) or {},
+            num_std,
+            encoding_mode=encoding_mode,
+        )
+
+        tableak_scores.append(float(np.nanmean(rand_tableak)))
+
+        if len(num_cols) > 0:
+            num_scores.append(float(np.mean(rand_num_acc)))
+        if len(cat_cols) > 0:
+            cat_scores.append(float(np.mean(rand_cat_acc)))
+
+    metrics: Dict[str, float] = {
+        "random_tableak_acc": float(np.mean(tableak_scores)),
+    }
+
+    if num_scores:
+        metrics["random_num_acc"] = float(np.mean(num_scores))
+
+    if cat_scores:
+        metrics["random_cat_acc"] = float(np.mean(cat_scores))
+
     return metrics
 
 

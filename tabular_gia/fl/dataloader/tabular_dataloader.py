@@ -201,31 +201,25 @@ def _split_target(df: pd.DataFrame, target, no_header) -> tuple[pd.DataFrame, pd
     return X, y
 
 
-def _infer_task_and_clean(
+def _clean_target_for_task(
     y: pd.Series,
     missing_values,
-) -> tuple[pd.Series, str, pd.Series]:
+    task: str,
+) -> tuple[pd.Series, pd.Series]:
     if missing_values is not None:
         y = y.replace(missing_values, pd.NA)
 
-    dtype_str = str(y.dtype)
-    if dtype_str == "object" or dtype_str.startswith("category"):
+    task_norm = str(task).strip().lower()
+    if task_norm in {"binary", "multiclass"}:
         keep_mask = y.notna()
-        y = y.loc[keep_mask].reset_index(drop=True)
-        classes = pd.Categorical(y, ordered=False).categories.tolist()
-        task = "binary" if len(classes) == 2 else "multiclass"
-        return y, task, keep_mask
+        return y.loc[keep_mask].reset_index(drop=True), keep_mask
+
+    if task_norm != "regression":
+        raise ValueError(f"Unknown task '{task}'. Expected one of: binary, multiclass, regression.")
 
     y_num = pd.to_numeric(y, errors="coerce")
     keep_mask = y_num.notna()
-    y_num = y_num.loc[keep_mask].reset_index(drop=True)
-    unique = y_num.nunique(dropna=False)
-    if unique <= 20:
-        classes = pd.Categorical(y_num, ordered=False).categories.tolist()
-        task = "binary" if len(classes) == 2 else "multiclass"
-        return y_num, task, keep_mask
-
-    return y_num, "regression", keep_mask
+    return y_num.loc[keep_mask].reset_index(drop=True), keep_mask
 
 
 def _encode_target(y: pd.Series, task: str, target_classes: list | None) -> torch.Tensor:
@@ -382,19 +376,22 @@ def load_dataset(
 
     # 3 perform target split
     target = meta["target"]
+    task = str(meta["task"]).strip().lower()
+    if task not in {"binary", "multiclass", "regression"}:
+        raise ValueError(f"meta.task must be one of binary|multiclass|regression, got '{meta['task']}'")
     missing_values = meta["missing_values"]
     X_full, y_full = _split_target(df, target, no_header)
     logger.info("Target split: target=%s features=%d", target, X_full.shape[1])
 
-    # 3.1 infer task objective and classes (binary, multiclass, regression)
-    y, task, keep_mask = _infer_task_and_clean(y_full, missing_values)
+    # 3.1 clean target according to declared task
+    y, keep_mask = _clean_target_for_task(y_full, missing_values, task)
     # drop rows with missing targets
     X_full = X_full.loc[keep_mask].reset_index(drop=True)
     if keep_mask.size:
         dropped = int((~keep_mask).sum())
     else:
         dropped = 0
-    logger.info("Task inferred: %s | dropped_missing_targets=%d", task, dropped)
+    logger.info("Task declared: %s | dropped_missing_targets=%d", task, dropped)
 
     # 4. split into train, val, test at ratios 70 / 15 / 15, stratify on target
     train_frac = dataset_cfg.train_frac
@@ -421,10 +418,8 @@ def load_dataset(
         else:
             test_df = pd.read_csv(test_path)
         X_test_split, y_test_split = _split_target(test_df, target, no_header)
-        y_test, task_test, keep_mask = _infer_task_and_clean(y_test_split, missing_values)
+        y_test, keep_mask = _clean_target_for_task(y_test_split, missing_values, task)
         X_test_split = X_test_split.loc[keep_mask].reset_index(drop=True)
-        if task_test != task:
-            raise ValueError(f"Test split task '{task_test}' does not match train task '{task}'")
     else:
         logger.info("No external test split; using internal train/val/test fractions.")
         X_train_split, X_holdout, y_train, y_temp = train_test_split(
@@ -492,9 +487,13 @@ def load_dataset(
     feature_columns = X_train.columns.tolist()
 
     # global train stats for val/test normalization
+    global_min = None
+    global_max = None
     if num_cols:
         global_mean = X_train[num_cols].mean()
         global_std = X_train[num_cols].std().replace(0, 1e-6)
+        global_min = X_train[num_cols].min()
+        global_max = X_train[num_cols].max()
         X_val = _normalize_numeric(X_val, num_cols, global_mean, global_std)
         X_test = _normalize_numeric(X_test, num_cols, global_mean, global_std)
 
@@ -555,14 +554,20 @@ def load_dataset(
     num_workers = dataset_cfg.num_workers
     pin_memory = dataset_cfg.pin_memory
     persistent_workers = dataset_cfg.persistent_workers
-    generator = torch.Generator()
-    generator.manual_seed(seed)
 
-    def _seed_worker(worker_id: int) -> None:
-        worker_seed = seed + worker_id
-        np.random.seed(worker_seed)
-        random.seed(worker_seed)
-        torch.manual_seed(worker_seed)
+    def _make_generator(loader_seed: int) -> torch.Generator:
+        generator = torch.Generator()
+        generator.manual_seed(int(loader_seed))
+        return generator
+
+    def _seed_worker_fn(loader_seed: int):
+        def _seed_worker(worker_id: int) -> None:
+            worker_seed = int(loader_seed) + int(worker_id)
+            np.random.seed(worker_seed)
+            random.seed(worker_seed)
+            torch.manual_seed(worker_seed)
+
+        return _seed_worker
 
     y_train_t = _encode_target(y_train, task, target_classes)
     y_val_t = _encode_target(y_val, task, target_classes)
@@ -637,11 +642,12 @@ def load_dataset(
             num_workers=num_workers,
             pin_memory=pin_memory,
             persistent_workers=persistent_workers,
-            worker_init_fn=_seed_worker if num_workers > 0 else None,
-            generator=generator,
+            worker_init_fn=_seed_worker_fn(seed + (client_idx * 1_000_003)) if num_workers > 0 else None,
+            generator=_make_generator(seed + (client_idx * 1_000_003)),
         )
         client_dataloaders.append(client_loader)
 
+    val_seed = seed + 2_000_003
     val_loader = DataLoader(
         val_ds,
         batch_size=batch_size,
@@ -649,9 +655,10 @@ def load_dataset(
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=persistent_workers,
-        worker_init_fn=_seed_worker if num_workers > 0 else None,
-        generator=generator,
+        worker_init_fn=_seed_worker_fn(val_seed) if num_workers > 0 else None,
+        generator=_make_generator(val_seed),
     )
+    test_seed = seed + 3_000_003
     test_loader = DataLoader(
         test_ds,
         batch_size=batch_size,
@@ -659,8 +666,8 @@ def load_dataset(
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=persistent_workers,
-        worker_init_fn=_seed_worker if num_workers > 0 else None,
-        generator=generator,
+        worker_init_fn=_seed_worker_fn(test_seed) if num_workers > 0 else None,
+        generator=_make_generator(test_seed),
     )
 
     feature_schema = {
@@ -679,6 +686,8 @@ def load_dataset(
         "num_classes": len(target_classes) if task in ("binary", "multiclass") else 1,
         "client_num_mean": [m.tolist() for m in client_num_means],
         "client_num_std": [s.tolist() for s in client_num_stds],
+        "train_num_min": global_min.tolist() if num_cols else [],
+        "train_num_max": global_max.tolist() if num_cols else [],
         "client_cat_probs": client_cat_probs,
     }
     logger.info("Feature schema: %s", feature_schema)
