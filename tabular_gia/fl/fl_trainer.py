@@ -1,6 +1,7 @@
 import logging
 import math
 import random
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable
 
@@ -10,8 +11,9 @@ from torch.utils.data import DataLoader, TensorDataset
 from configs.fl.fedavg import FedAvgConfig
 from configs.fl.fedsgd import FedSGDConfig
 from fl.metrics.fl_metrics import eval, progress_write, round_bar
-from leakpro.fl_utils.gia_optimizers import MetaAdam, MetaSGD
-from leakpro.fl_utils.gia_train import train, train_nostep
+from fl.fl_optimizers import FLAdam, FLOptimizer, FLSGD
+from leakpro.fl_utils.gia_module_to_functional import MetaModule
+from tabular_gia.fl.model_mode_utils import bn_eval_mode
 from leakpro.utils.seed import capture_rng_state
 
 
@@ -285,6 +287,52 @@ class FLTrainer:
 
 class FedAvgTrainer(FLTrainer):
 
+    def _build_fl_optimizer(self, optimizer_name: str, lr: float) -> FLOptimizer:
+        if optimizer_name == "MetaSGD":
+            return FLSGD(lr=lr)
+        if optimizer_name == "MetaAdam":
+            return FLAdam(lr=lr)
+        raise ValueError(f"Unsupported optimizer '{optimizer_name}' for FedAvgTrainer.train_fast")
+
+    def train_fast(
+        self,
+        model,
+        data: DataLoader,
+        optimizer: FLOptimizer,
+        criterion,
+        epochs: int,
+    ) -> list[torch.Tensor]:
+        """Fast FL-only variant of gia_train.train with first-order gradients only."""
+        gpu_or_cpu = next(model.parameters()).device
+        patched_model = MetaModule(model)
+        patched_model.parameters = OrderedDict(
+            (name, param.detach().clone().requires_grad_(param.requires_grad))
+            for name, param in patched_model.parameters.items()
+        )
+        outputs = None
+
+        for _ in range(epochs):
+            for inputs, labels in data:
+                inputs, labels = inputs.to(gpu_or_cpu, non_blocking=True), (
+                    labels.to(gpu_or_cpu, non_blocking=True) if isinstance(labels, torch.Tensor) else labels
+                )
+                with bn_eval_mode(patched_model):
+                    outputs = patched_model(inputs, patched_model.parameters)
+                loss = criterion(outputs, labels).sum()
+                patched_model.parameters = optimizer.step(loss, patched_model.parameters)
+                # Keep numerical updates identical while dropping step-to-step autograd history.
+                patched_model.parameters = OrderedDict(
+                    (name, p.detach().requires_grad_(p.requires_grad))
+                    for name, p in patched_model.parameters.items()
+                )
+
+        model_delta = OrderedDict(
+            (name, param - param_origin)
+            for ((name, param), (name_origin, param_origin))
+            in zip(patched_model.parameters.items(), OrderedDict(model.named_parameters()).items())
+        )
+        return list(model_delta.values())
+
     def _fedavg_train(self, global_model, client_updates):
         if not client_updates:
             return
@@ -384,9 +432,15 @@ class FedAvgTrainer(FLTrainer):
                     samples_seen = len(labels_cat) * local_epochs
                     examples_seen[client_idx] += samples_seen
 
-                    optimizer = MetaAdam(lr=lr) if optimizer_name == "MetaAdam" else MetaSGD(lr=lr)
                     rng_pre = capture_rng_state()
-                    deltas = train(model, batch_loader, optimizer, criterion, epochs=local_epochs)
+                    fl_optimizer = self._build_fl_optimizer(optimizer_name=optimizer_name, lr=lr)
+                    deltas = self.train_fast(
+                        model=model,
+                        data=batch_loader,
+                        optimizer=fl_optimizer,
+                        criterion=criterion,
+                        epochs=local_epochs,
+                    )
                     rng_post = capture_rng_state()
                     client_updates.append((deltas, samples_seen))
                     if attack_payloads is not None:
@@ -442,6 +496,36 @@ class FedAvgTrainer(FLTrainer):
 
 
 class FedSGDTrainer(FLTrainer):
+
+    def train_nostep_fast(
+        self,
+        model,
+        data: DataLoader,
+        criterion,
+        epochs: int,
+    ) -> list[torch.Tensor | None]:
+        """Fast FL-only variant of gia_train.train_nostep with first-order gradients only."""
+        gpu_or_cpu = next(model.parameters()).device
+        outputs = None
+        params = list(model.parameters())
+        grads = None
+        for _ in range(epochs):
+            for inputs, labels in data:
+                inputs, labels = inputs.to(gpu_or_cpu, non_blocking=True), (
+                    labels.to(gpu_or_cpu, non_blocking=True) if isinstance(labels, torch.Tensor) else labels
+                )
+                with bn_eval_mode(model):
+                    outputs = model(inputs)
+                loss = criterion(outputs, labels).sum()
+                grads = torch.autograd.grad(
+                    loss,
+                    params,
+                    retain_graph=False,
+                    create_graph=False,
+                    only_inputs=True,
+                    allow_unused=True,
+                )
+        return list(grads) if grads is not None else [None for _ in params]
 
     def _fedsgd_train(self, global_model, client_gradients, lr):
         if not client_gradients:
@@ -530,14 +614,16 @@ class FedSGDTrainer(FLTrainer):
                     samples_seen = len(labels) * local_epochs
                     examples_seen[client_idx] += samples_seen
 
-                    device = next(model.parameters()).device
-                    inputs = inputs.to(device, non_blocking=True)
-                    labels = labels.to(device, non_blocking=True)
                     batch_ds = TensorDataset(inputs, labels)
                     batch_loader = DataLoader(batch_ds, batch_size=len(batch_ds), shuffle=False)
 
                     rng_pre = capture_rng_state()
-                    grads = train_nostep(model, batch_loader, MetaSGD(lr), criterion, epochs=local_epochs)
+                    grads = self.train_nostep_fast(
+                        model=model,
+                        data=batch_loader,
+                        criterion=criterion,
+                        epochs=local_epochs,
+                    )
                     rng_post = capture_rng_state()
                     client_gradients.append([g.detach() if g is not None else None for g in grads])
                     if attack_payloads is not None:
