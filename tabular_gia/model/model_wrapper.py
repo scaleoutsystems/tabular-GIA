@@ -72,6 +72,27 @@ class ModelWrapper(nn.Module):
                 n_num_features=int(feature_schema["n_num_features"]),
                 cat_cardinalities=list(feature_schema["cat_cardinalities"]),
             )
+        if arch == "resnet": # defaults from rtdl_revisiting_models README.md
+            encoding_mode = str(feature_schema["encoding_mode"]).strip().lower()
+            assert encoding_mode=="onehot", "ResNet feature_schema['encoding_mode']=='onehot'"
+            defaults = {
+                "n_blocks": 2,
+                "d_block": 192,
+                "d_hidden": None,
+                "d_hidden_multiplier": 2.0,
+                "dropout1": 0.15,
+                "dropout2": 0.0,
+            }
+            unknown = sorted(set(cfg.keys()) - set(defaults.keys()))
+            if unknown:
+                raise ValueError(f"Unknown ResNet config keys: {unknown}")
+            resnet_kwargs = {**defaults, **cfg}
+            return ResNetWrapper(
+                task=task,
+                d_out=d_out,
+                d_in=int(feature_schema["num_features"]),
+                **resnet_kwargs,
+            )
         if arch != "mlp":
             raise ValueError(f"Unknown model arch '{arch}'.")
 
@@ -122,3 +143,35 @@ class FTTransformerWrapper(ModelWrapper):
         else:
             x_cat = None
         return self.backbone(x_num, x_cat)
+
+
+class ResNetWrapper(ModelWrapper):
+    def __init__(
+        self,
+        *,
+        task: str,
+        d_out: int,
+        d_in: int,
+        n_blocks: int,
+        d_block: int,
+        d_hidden: int | None,
+        d_hidden_multiplier: float | None,
+        dropout1: float,
+        dropout2: float,
+    ) -> None:
+        super().__init__(task=task)
+        from rtdl_revisiting_models import ResNet
+
+        self.backbone = ResNet(
+            d_in=int(d_in),
+            d_out=int(d_out),
+            n_blocks=int(n_blocks),
+            d_block=int(d_block),
+            d_hidden=None if d_hidden is None else int(d_hidden),
+            d_hidden_multiplier=None if d_hidden_multiplier is None else float(d_hidden_multiplier),
+            dropout1=float(dropout1),
+            dropout2=float(dropout2),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.backbone(x.float())

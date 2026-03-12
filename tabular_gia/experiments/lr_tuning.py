@@ -101,11 +101,12 @@ def build_sweep_cfg() -> dict[str, Any]:
                     "activation": "gelu",
                 },
                 "fttransformer": {"arch": "fttransformer"},
+                "resnet": {"arch": "resnet"},
             },
         },
         "grid": {
             # For LR tuning we keep MLP presets by default.
-            "preset": ["small", "medium", "large", "fttransformer"],
+            "preset": ["small", "medium", "large", "fttransformer", "resnet"],
         },
     }
 

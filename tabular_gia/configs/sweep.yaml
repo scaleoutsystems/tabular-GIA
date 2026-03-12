@@ -10,7 +10,7 @@ base:
     protocol: fedavg
     seed: 42
   grid:
-    protocol: [fedsgd, fedavg]
+    protocol: [fedavg, fedsgd]
     seed: [7, 13, 42]
 
 dataset:
@@ -43,7 +43,9 @@ model:
       medium: {arch: mlp, d_hidden: 128, num_layers: 3, norm: layernorm, dropout: 0.1, activation: gelu}
       large:  {arch: mlp, d_hidden: 256, num_layers: 4, norm: layernorm, dropout: 0.2, activation: gelu}
       fttransformer: {arch: fttransformer}
+      resnet: {arch: resnet}
   grid:
+    preset: ["small", "fttransformer", "resnet"]
     # Explicit mode example:
     # preset: null
     # d_hidden: [64, 128, 256]
@@ -79,7 +81,7 @@ gia:
     attack_mode: round_checkpoint
     fixed_batch_k: 1 # only used when attack_mode is fixed_batch
     attack_schedule: auto
-    auto_checkpoints: 6
+    auto_checkpoints: 5
     attack_exposure_milestones: [0.0, 0.5, 1.0, 2.0, 5.0, 10.0]
     invertingconfig:
       label_known: true

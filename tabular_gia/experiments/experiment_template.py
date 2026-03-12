@@ -73,6 +73,7 @@ def build_sweep_cfg() -> dict[str, Any]:
                     "activation": "gelu",
                 },
                 "fttransformer": {"arch": "fttransformer"},
+                "resnet": {"arch": "resnet"},
             },
         },
         "grid": {

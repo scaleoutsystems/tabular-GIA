@@ -31,6 +31,9 @@ def _default_presets() -> dict[str, dict[str, Any]]:
         "fttransformer": {
             "arch": "fttransformer",
         },
+        "resnet": {
+            "arch": "resnet",
+        },
     }
 
 
