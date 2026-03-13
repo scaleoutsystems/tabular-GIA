@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 
 from leakpro.fl_utils.gia_module_to_functional import MetaModule
 from leakpro.fl_utils.gia_optimizers import MetaOptimizer
-from tabular_gia.fl.model_mode_utils import bn_eval_mode
+from leakpro.fl_utils.model_mode_utils import bn_eval_mode
 
 
 def train(

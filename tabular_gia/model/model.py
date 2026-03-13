@@ -11,15 +11,15 @@ class TabularMLP(ModelWrapper):
         d_in: int,
         d_hidden: int,
         d_out: int,
-        num_layers: int,
+        n_hidden_layers: int,
         norm: str,
         dropout: float,
         activation: str,
         task: str,
     ) -> None:
         super().__init__(task=task)
-        if num_layers < 1:
-            raise ValueError("num_layers must be >= 1")
+        if n_hidden_layers < 0:
+            raise ValueError("n_hidden_layers must be >= 0")
 
         self.hidden = nn.ModuleList()
         self.norms = nn.ModuleList()
@@ -34,7 +34,7 @@ class TabularMLP(ModelWrapper):
         else:
             raise ValueError(f"Unknown activation: {activation}")
 
-        for layer_idx in range(max(num_layers - 1, 0)):
+        for layer_idx in range(n_hidden_layers):
             in_dim = d_in if layer_idx == 0 else d_hidden
             self.hidden.append(nn.Linear(in_dim, d_hidden))
             if norm == "batchnorm":
@@ -47,7 +47,7 @@ class TabularMLP(ModelWrapper):
                 raise ValueError(f"Unknown norm: {norm}")
             self.dropouts.append(nn.Dropout(dropout) if dropout > 0 else nn.Identity())
 
-        out_in = d_in if num_layers == 1 else d_hidden
+        out_in = d_in if n_hidden_layers == 0 else d_hidden
         self.out = nn.Linear(out_in, d_out)
         for layer in list(self.hidden) + [self.out]:
             if not isinstance(layer, nn.Linear):

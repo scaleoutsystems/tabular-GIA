@@ -13,7 +13,7 @@ from configs.fl.fedsgd import FedSGDConfig
 from fl.metrics.fl_metrics import eval, progress_write, round_bar
 from fl.fl_optimizers import FLAdam, FLOptimizer, FLSGD
 from leakpro.fl_utils.gia_module_to_functional import MetaModule
-from tabular_gia.fl.model_mode_utils import bn_eval_mode
+from leakpro.fl_utils.model_mode_utils import bn_eval_mode
 from leakpro.utils.seed import capture_rng_state
 
 
