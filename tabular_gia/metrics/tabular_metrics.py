@@ -88,6 +88,9 @@ def prepare_tensors_for_metrics(
 
     orig_tensor = attacker.original.detach().cpu()
     recon_tensor = torch.cat([batch[0] for batch in attacker.best_reconstruction], dim=0).detach().cpu()
+    if recon_tensor.shape[1] != orig_tensor.shape[1] and hasattr(attacker, "model") and hasattr(attacker.model, "from_gia_space"):
+        with torch.no_grad():
+            recon_tensor = attacker.model.from_gia_space(recon_tensor).detach().cpu()
 
     labels = attacker.reconstruction_labels
     if labels is None:

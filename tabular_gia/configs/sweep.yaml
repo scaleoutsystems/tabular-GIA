@@ -33,25 +33,25 @@ model:
   default:
     preset: small # when preset is non-null, presets[preset] defines the model config
     arch: mlp
-    d_hidden: 64
-    num_layers: 2
+    d_hidden: 32
+    n_hidden_layers: 1
     norm: none
     dropout: 0.0
     activation: relu
     presets:
-      small:  {arch: mlp, d_hidden: 64, num_layers: 2, norm: layernorm, dropout: 0.0, activation: gelu}
-      medium: {arch: mlp, d_hidden: 128, num_layers: 3, norm: layernorm, dropout: 0.1, activation: gelu}
-      large:  {arch: mlp, d_hidden: 256, num_layers: 4, norm: layernorm, dropout: 0.2, activation: gelu}
+      small:  {arch: mlp, d_hidden: 32, n_hidden_layers: 1, norm: layernorm, dropout: 0.0, activation: gelu}
+      medium: {arch: mlp, d_hidden: 64, n_hidden_layers: 2, norm: layernorm, dropout: 0.1, activation: gelu}
+      large:  {arch: mlp, d_hidden: 128, n_hidden_layers: 3, norm: layernorm, dropout: 0.2, activation: gelu}
       fttransformer: {arch: fttransformer}
       resnet: {arch: resnet}
   grid:
     preset: ["small", "fttransformer", "resnet"]
     # Explicit mode example:
     # preset: null
-    # d_hidden: [64, 128, 256]
-    # num_layers: [1, 2, 3]
+    # d_hidden: [32, 64, 128]
+    # n_hidden_layers: [0, 1, 2]
     # norm: [none, batchnorm, layernorm]
-    # dropout: [0.0, 0.15, 0.3]
+    # dropout: [0.0, 0.1, 0.2]
     # activation: [relu, gelu, silu]
 
 fl:

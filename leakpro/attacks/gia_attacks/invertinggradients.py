@@ -12,6 +12,7 @@ from torch.nn import CrossEntropyLoss, Module
 from torch.utils.data import DataLoader
 
 from leakpro.attacks.gia_attacks.abstract_gia import AbstractGIA
+from leakpro.fl_utils.data_utils import CustomTensorDataset
 from leakpro.fl_utils.data_utils import GiaImageExtension, GiaTabularExtension
 from leakpro.fl_utils.gia_optimizers import MetaSGD
 from leakpro.fl_utils.gia_train import train
@@ -120,6 +121,17 @@ class InvertingGradients(AbstractGIA):
             self.reconstruction_labels,
             self.reconstruction_loader
         ) = self.configs.data_extension.get_at_data(self.client_loader)
+        self.is_tabular = isinstance(self.configs.data_extension, GiaTabularExtension)
+        if self.is_tabular and hasattr(self.model, "to_gia_space"):
+            with torch.no_grad():
+                reconstruction_gia = self.model.to_gia_space(self.reconstruction)
+            self.reconstruction = reconstruction_gia.detach().clone()
+            self.reconstruction_loader = DataLoader(
+                CustomTensorDataset(self.reconstruction, self.reconstruction_labels),
+                batch_size=self.reconstruction_loader.batch_size or 32,
+                shuffle=False,
+                drop_last=self.reconstruction_loader.drop_last,
+            )
         self.reconstruction.requires_grad = True
         current_state = None
         if self.replay_rng_state is not None:
@@ -139,7 +151,6 @@ class InvertingGradients(AbstractGIA):
             GIAResults: Container for results on GIA attacks.
 
         """
-        self.is_tabular = isinstance(self.configs.data_extension, GiaTabularExtension)
         return self.generic_attack_loop(self.configs, self.gradient_closure, self.configs.at_iterations, self.reconstruction,
                                 self.data_mean, self.data_std, self.configs.attack_lr, self.configs.median_pooling,
                                 self.client_loader, self.reconstruction_loader, is_tabular=self.is_tabular)
