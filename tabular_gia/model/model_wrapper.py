@@ -44,7 +44,7 @@ class ModelWrapper(nn.Module):
     @classmethod
     def infer_encoding_mode(cls, model_cfg: ModelConfig) -> str:
         cfg = cls.resolve_model_cfg(model_cfg)
-        arch = str(cfg["arch"]).strip().lower()
+        arch = cfg["arch"].strip().lower()
         if arch == "fttransformer":
             return "ordinal"
         return "onehot"
@@ -59,7 +59,7 @@ class ModelWrapper(nn.Module):
         else:
             d_out = 1
 
-        arch = str(cfg["arch"]).strip().lower()
+        arch = cfg["arch"].strip().lower()
         del cfg["arch"]
         if arch == "fttransformer":
             if cfg:

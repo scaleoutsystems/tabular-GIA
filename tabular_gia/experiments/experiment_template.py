@@ -8,7 +8,7 @@ from experiments.sweep_runner import SweepExperimentRunner, SweepRunResults
 def build_sweep_cfg() -> dict[str, Any]:
     base = {
         "default": {
-            "protocol": "fedavg",
+            "protocol": "fedsgd",
             "seed": 42,
         },
         "grid": {
@@ -43,15 +43,15 @@ def build_sweep_cfg() -> dict[str, Any]:
             "preset": "small",
             "arch": "mlp",
             "d_hidden": 32,
-            "n_hidden_layers": 1,
-            "norm": "none",
+            "n_hidden_layers": 2,
+            "norm": "layernorm",
             "dropout": 0.0,
-            "activation": "relu",
+            "activation": "gelu",
             "presets": {
                 "small": {
                     "arch": "mlp",
                     "d_hidden": 32,
-                    "n_hidden_layers": 1,
+                    "n_hidden_layers": 2,
                     "norm": "layernorm",
                     "dropout": 0.0,
                     "activation": "gelu",
@@ -77,7 +77,7 @@ def build_sweep_cfg() -> dict[str, Any]:
             },
         },
         "grid": {
-            "preset": ["small", "fttransformer"],
+            #"preset": ["small", "resnet", "fttransformer"],
         },
     }
 
@@ -87,9 +87,10 @@ def build_sweep_cfg() -> dict[str, Any]:
                 "local_steps": 1,
                 "local_epochs": 1,
                 "num_clients": 10,
-                "min_exposure": 10.0,
+                "min_exposure": 25.0,
                 "optimizer": "MetaSGD",
                 "lr": 0.01,
+                "vectorized_clients": True,
             },
             "grid": {},
         },
@@ -97,10 +98,10 @@ def build_sweep_cfg() -> dict[str, Any]:
             "default": {
                 "local_steps": "all",
                 "local_epochs": 1,
-                "max_client_dataset_examples": 64,
+                "max_client_dataset_examples": 256,
                 "num_clients": 3,
-                "min_exposure": 10.0,
-                "optimizer": "MetaAdam",
+                "min_exposure": 25.0,
+                "optimizer": "MetaSGD",
                 "lr": 0.01,
             },
             "grid": {},
@@ -112,12 +113,12 @@ def build_sweep_cfg() -> dict[str, Any]:
             "attack_mode": "round_checkpoint",
             "fixed_batch_k": 1,
             "attack_schedule": "auto",
-            "auto_checkpoints": 6,
+            "auto_checkpoints": 5,
             "attack_exposure_milestones": [0.0, 0.5, 1.0, 2.0, 5.0, 10.0],
             "invertingconfig": {
                 "label_known": True,
                 "attack_lr": 0.03,
-                "at_iterations": 1,
+                "at_iterations": 10000,
                 "data_extension": "GiaTabularExtension",
             },
         },

@@ -7,10 +7,10 @@
 
 base:
   default:
-    protocol: fedavg
+    protocol: fedsgd
     seed: 42
   grid:
-    protocol: [fedavg, fedsgd]
+    protocol: [fedsgd, fedavg]
     seed: [7, 13, 42]
 
 dataset:
@@ -34,22 +34,22 @@ model:
     preset: small # when preset is non-null, presets[preset] defines the model config
     arch: mlp
     d_hidden: 32
-    n_hidden_layers: 1
-    norm: none
+    n_hidden_layers: 2
+    norm: layernorm
     dropout: 0.0
-    activation: relu
+    activation: gelu
     presets:
-      small:  {arch: mlp, d_hidden: 32, n_hidden_layers: 1, norm: layernorm, dropout: 0.0, activation: gelu}
+      small:  {arch: mlp, d_hidden: 32, n_hidden_layers: 2, norm: layernorm, dropout: 0.0, activation: gelu}
       medium: {arch: mlp, d_hidden: 64, n_hidden_layers: 2, norm: layernorm, dropout: 0.1, activation: gelu}
       large:  {arch: mlp, d_hidden: 128, n_hidden_layers: 3, norm: layernorm, dropout: 0.2, activation: gelu}
       fttransformer: {arch: fttransformer}
       resnet: {arch: resnet}
   grid:
-    preset: ["small", "fttransformer", "resnet"]
+    preset: ["small", "resnet", "fttransformer"]
     # Explicit mode example:
     # preset: null
     # d_hidden: [32, 64, 128]
-    # n_hidden_layers: [0, 1, 2]
+    # n_hidden_layers: [1, 2, 3]
     # norm: [none, batchnorm, layernorm]
     # dropout: [0.0, 0.1, 0.2]
     # activation: [relu, gelu, silu]
@@ -63,6 +63,7 @@ fl:
       min_exposure: 25.0
       optimizer: MetaSGD
       lr: 0.01
+      vectorized_clients: true
     grid:
 
   fedavg:
@@ -72,7 +73,7 @@ fl:
       max_client_dataset_examples: 256
       num_clients: 3
       min_exposure: 25.0
-      optimizer: MetaAdam
+      optimizer: MetaSGD
       lr: 0.01
     grid:
 

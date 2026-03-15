@@ -598,8 +598,6 @@ def load_dataset(
             current_idx = len(num_cols)
             for col in cat_cols:
                 cats = encoder_meta["cat_categories"][col]
-                if isinstance(cats, dict):
-                    cats = cats["categories"]
                 n_cats = len(cats)
                 if n_cats <= 0 or current_idx + n_cats > X_client.shape[1]:
                     continue

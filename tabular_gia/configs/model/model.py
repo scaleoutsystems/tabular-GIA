@@ -7,7 +7,7 @@ def _default_presets() -> dict[str, dict[str, Any]]:
         "small": {
             "arch": "mlp",
             "d_hidden": 32,
-            "n_hidden_layers": 1,
+            "n_hidden_layers": 2,
             "norm": "layernorm",
             "dropout": 0.0,
             "activation": "gelu",
@@ -39,14 +39,14 @@ def _default_presets() -> dict[str, dict[str, Any]]:
 
 @dataclass
 class ModelConfig:
-    preset: str | None = "fttransformer" # / None
-
+    preset: str | None = "small" # / None
+    # small below
     arch: str = "mlp"
     d_hidden: int = 32
     n_hidden_layers: int = 2
-    norm: str = "none"
+    norm: str = "layernorm"
     dropout: float = 0.0
-    activation: str = "relu"
+    activation: str = "gelu"
 
     presets: dict[str, dict[str, Any]] = field(default_factory=_default_presets)
 

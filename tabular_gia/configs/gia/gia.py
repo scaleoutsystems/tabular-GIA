@@ -27,7 +27,7 @@ class GiaConfig:
 
     attack_rounds: list[int] = field(default_factory=list) # NOTE: attack_mode: fixed
     attack_num_checkpoints: int = 8 # NOTE: attack_mode: logspace
-    auto_checkpoints: int = 6 # NOTE: attack_mode: auto
+    auto_checkpoints: int = 5 # NOTE: attack_mode: auto
     attack_exposure_milestones: list[float] = field(default_factory=lambda: [0.0, 0.5, 1.0, 2.0, 5.0, 10.0]) # NOTE: attack_mode: exposure
 
     # invertingconfig

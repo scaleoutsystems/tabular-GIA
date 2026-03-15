@@ -23,7 +23,6 @@ from leakpro.fl_utils.similarity_measurements import (
 from leakpro.metrics.attack_result import GIAResults
 from leakpro.utils.import_helper import Callable, Self
 from leakpro.utils.logger import logger
-from leakpro.utils.seed import capture_rng_state, restore_rng_state
 
 
 @dataclass
@@ -55,9 +54,17 @@ class InvertingConfig:
 class InvertingGradients(AbstractGIA):
     """Gradient inversion attack by Geiping et al."""
 
-    def __init__(self: Self, model: Module, client_loader: DataLoader, data_mean: Tensor, data_std: Tensor,
-                 train_fn: Optional[Callable] = None, configs: Optional[InvertingConfig] = None, optuna_trial_data: list = None
-                 ) -> None:
+    def __init__(
+        self: Self,
+        model: Module,
+        client_loader: DataLoader,
+        data_mean: Tensor,
+        data_std: Tensor,
+        train_fn: Optional[Callable] = None,
+        configs: Optional[InvertingConfig] = None,
+        optuna_trial_data: list = None,
+        observed_client_gradient: Optional[list[Tensor | None]] = None,
+    ) -> None:
         super().__init__()
         self.original_model = model
         self.model = deepcopy(self.original_model)
@@ -68,7 +75,6 @@ class InvertingGradients(AbstractGIA):
         self.configs = configs if configs is not None else InvertingConfig()
         # Keep an untouched optimizer prototype so each replay can start from fresh state.
         self._optimizer_prototype = deepcopy(self.configs.optimizer)
-        self.replay_rng_state = None
         self.is_tabular = False
         self.best_loss = float("inf")
         self.best_reconstruction = None
@@ -78,6 +84,7 @@ class InvertingGradients(AbstractGIA):
         os.makedirs(self.attack_cache_folder_path, exist_ok=True)
         # optuna trial data
         self.optuna_trial_data = optuna_trial_data
+        self.observed_client_gradient = observed_client_gradient
 
         logger.info("Inverting gradient initialized.")
 
@@ -133,14 +140,16 @@ class InvertingGradients(AbstractGIA):
                 drop_last=self.reconstruction_loader.drop_last,
             )
         self.reconstruction.requires_grad = True
-        current_state = None
-        if self.replay_rng_state is not None:
-            current_state = capture_rng_state()
-            restore_rng_state(self.replay_rng_state)
-        client_gradient = self.train_fn(self.model, self.client_loader, self._new_meta_optimizer(),
-                                        self.configs.criterion, self.configs.epochs)
-        if current_state is not None:
-            restore_rng_state(current_state)
+        if self.observed_client_gradient is not None:
+            self.client_gradient = [p.detach() if p is not None else None for p in self.observed_client_gradient]
+            return
+        client_gradient = self.train_fn(
+            self.model,
+            self.client_loader,
+            self._new_meta_optimizer(),
+            self.configs.criterion,
+            self.configs.epochs,
+        )
         self.client_gradient = [p.detach() for p in client_gradient]
 
     def run_attack(self:Self) -> Generator[tuple[int, Tensor, GIAResults]]:
@@ -178,13 +187,8 @@ class InvertingGradients(AbstractGIA):
             optimizer.zero_grad()
             self.model.zero_grad()
 
-            if self.replay_rng_state is not None:
-                current_state = capture_rng_state()
-                restore_rng_state(self.replay_rng_state)
             gradient = self.train_fn(self.model, self.reconstruction_loader, self._new_meta_optimizer(),
                                      self.configs.criterion, self.configs.epochs)
-            if self.replay_rng_state is not None:
-                restore_rng_state(current_state)
             rec_loss = cosine_similarity_weights(gradient, self.client_gradient, self.configs.top10norms)
             if not self.is_tabular:
                 tv_reg = (self.configs.tv_reg * total_variation(self.reconstruction))
