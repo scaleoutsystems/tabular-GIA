@@ -491,7 +491,7 @@ def load_dataset(
     global_max = None
     if num_cols:
         global_mean = X_train[num_cols].mean()
-        global_std = X_train[num_cols].std().replace(0, 1e-6)
+        global_std = X_train[num_cols].std(ddof=0).replace(0, 1e-6)
         global_min = X_train[num_cols].min()
         global_max = X_train[num_cols].max()
         X_val = _normalize_numeric(X_val, num_cols, global_mean, global_std)
@@ -584,7 +584,7 @@ def load_dataset(
     for client_idx, (X_client, y_client) in enumerate(client_splits):
         if num_cols:
             client_mean = X_client[num_cols].mean()
-            client_std = X_client[num_cols].std().replace(0, 1e-6)
+            client_std = X_client[num_cols].std(ddof=0).replace(0, 1e-6)
             X_client = _normalize_numeric(X_client, num_cols, client_mean, client_std)
             client_num_means.append(client_mean.to_numpy(dtype=np.float32, copy=True))
             client_num_stds.append(client_std.to_numpy(dtype=np.float32, copy=True))
@@ -598,8 +598,6 @@ def load_dataset(
             current_idx = len(num_cols)
             for col in cat_cols:
                 cats = encoder_meta["cat_categories"][col]
-                if isinstance(cats, dict):
-                    cats = cats["categories"]
                 n_cats = len(cats)
                 if n_cats <= 0 or current_idx + n_cats > X_client.shape[1]:
                     continue

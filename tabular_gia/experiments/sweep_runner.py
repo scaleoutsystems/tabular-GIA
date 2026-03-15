@@ -100,9 +100,8 @@ def _iter_run_combos(
 
 
 def _parse_section(name: str, section: dict[str, Any]) -> tuple[dict[str, Any], dict[str, list[Any]]]:
-    default_raw = section.get("default")
-    grid_raw_obj = section.get("grid")
-
+    default_raw = section["default"] if "default" in section else {}
+    grid_raw_obj = section["grid"] if "grid" in section else {}
     if default_raw is None:
         default_raw = {}
     if grid_raw_obj is None:
@@ -227,7 +226,7 @@ def build_run_configs(
 
     base_grid = {k: v for k, v in base_grid_full.items() if k not in {"protocol", "seed"}}
 
-    preset_grid_values = model_grid_full.get("preset")
+    preset_grid_values = model_grid_full["preset"] if "preset" in model_grid_full else None
     explicit_model_mode: bool
     if preset_grid_values is not None:
         preset_values = _unique_values(preset_grid_values)
@@ -290,7 +289,7 @@ def build_run_configs(
             model_params.update(model_override)
             model_preset, model_cfg_dict = _resolve_model_cfg(
                 model_params=model_params,
-                model_presets=model_params.get("presets", {}),
+                model_presets=model_params["presets"] if "presets" in model_params else {},
             )
 
             gia_params = deepcopy(gia_default)

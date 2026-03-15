@@ -106,7 +106,7 @@ def eval(loaders: list[DataLoader], model: torch.nn.Module, criterion: torch.nn.
     binary_scores = []
 
     model.eval()
-    with torch.no_grad():
+    with torch.inference_mode():
         for loader in loaders:
             for xb, yb in loader:
                 xb = xb.to(device, non_blocking=True)

@@ -2,13 +2,13 @@ from dataclasses import asdict, dataclass
 from typing import Literal
 
 
-ProtocolName = Literal["fedavg", "fedsgd"]
+ProtocolName = Literal["fedsgd", "fedavg"]
 
 
 @dataclass
 class BaseConfig:
     seed: int = 42
-    protocol: ProtocolName = "fedavg"
+    protocol: ProtocolName = "fedsgd"
 
     def to_dict(self) -> dict:
         return asdict(self)

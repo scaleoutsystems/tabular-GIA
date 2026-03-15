@@ -44,7 +44,7 @@ class ModelWrapper(nn.Module):
     @classmethod
     def infer_encoding_mode(cls, model_cfg: ModelConfig) -> str:
         cfg = cls.resolve_model_cfg(model_cfg)
-        arch = str(cfg["arch"]).strip().lower()
+        arch = cfg["arch"].strip().lower()
         if arch == "fttransformer":
             return "ordinal"
         return "onehot"
@@ -59,7 +59,7 @@ class ModelWrapper(nn.Module):
         else:
             d_out = 1
 
-        arch = str(cfg["arch"]).strip().lower()
+        arch = cfg["arch"].strip().lower()
         del cfg["arch"]
         if arch == "fttransformer":
             if cfg:
@@ -120,29 +120,108 @@ class FTTransformerWrapper(ModelWrapper):
 
         self.n_num_features = int(n_num_features)
         self.n_cat_features = int(len(cat_cardinalities))
+        self.gia_soft_temperature = 1.0
+        self.gia_init_logit_scale = 1.0
+        self.cat_cardinalities = [int(c) for c in cat_cardinalities]
         self.register_buffer(
             "cat_index_max",
-            torch.tensor([int(c) - 1 for c in cat_cardinalities], dtype=torch.float32),
+            torch.tensor([c - 1 for c in self.cat_cardinalities], dtype=torch.float32),
             persistent=False,
         )
         default_kwargs = FTTransformer.get_default_kwargs()
         self.backbone = FTTransformer(
             n_cont_features=self.n_num_features,
-            cat_cardinalities=cat_cardinalities,
+            cat_cardinalities=self.cat_cardinalities,
             d_out=int(d_out),
             **default_kwargs,
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    @property
+    def gia_space_dim(self) -> int:
+        return int(self.n_num_features + sum(self.cat_cardinalities))
+
+    def to_gia_space(self, x: torch.Tensor) -> torch.Tensor:
+        if self.n_cat_features <= 0:
+            return x.float()
         x_num = x[:, : self.n_num_features].float()
-        if self.n_cat_features > 0:
-            x_cat = x[:, self.n_num_features : self.n_num_features + self.n_cat_features]
-            x_cat = torch.clamp(x_cat, min=0.0) # this needs to change later and be removed and an explicit GIA forward needs to be defined for differentiable ordinals in the attack. adaptive attacker style because that is realistic under the HBC server assumption
-            x_cat = torch.minimum(x_cat, self.cat_index_max.to(device=x_cat.device, dtype=x_cat.dtype))
-            x_cat = x_cat.long()
-        else:
-            x_cat = None
-        return self.backbone(x_num, x_cat)
+        x_cat = x[:, self.n_num_features : self.n_num_features + self.n_cat_features]
+        x_cat = torch.clamp(x_cat, min=0.0)
+        x_cat = torch.minimum(x_cat, self.cat_index_max.to(device=x_cat.device, dtype=x_cat.dtype))
+        x_idx = x_cat.long()
+        cat_logits = []
+        for i, card in enumerate(self.cat_cardinalities):
+            scale = float(self.gia_init_logit_scale)
+            logits = torch.full(
+                (x.shape[0], card),
+                fill_value=-scale,
+                device=x.device,
+                dtype=x.dtype,
+            )
+            logits.scatter_(1, x_idx[:, i : i + 1], scale)
+            cat_logits.append(logits)
+        return torch.cat([x_num, *cat_logits], dim=1)
+
+    def from_gia_space(self, x_gia: torch.Tensor) -> torch.Tensor:
+        if self.n_cat_features <= 0:
+            return x_gia[:, : self.n_num_features].float()
+        x_num = x_gia[:, : self.n_num_features].float()
+        start = self.n_num_features
+        decoded = []
+        for card in self.cat_cardinalities:
+            logits = x_gia[:, start : start + card]
+            idx = torch.argmax(logits, dim=1, keepdim=True).float()
+            decoded.append(idx)
+            start += card
+        return torch.cat([x_num, *decoded], dim=1)
+
+    def _build_tokens_from_cat_probs(self, x_num: torch.Tensor, cat_probs: list[torch.Tensor]) -> torch.Tensor:
+        cat_module = self.backbone.cat_embeddings
+        if cat_module is None:
+            raise ValueError("cat_embeddings must not be None when categorical features are present")
+        cat_tokens = []
+        for probs, emb in zip(cat_probs, cat_module.embeddings):
+            cat_tokens.append(probs @ emb.weight)
+        cat_tokens = torch.stack(cat_tokens, dim=1)
+        if cat_module.bias is not None:
+            cat_tokens = cat_tokens + cat_module.bias
+
+        tokens = [self.backbone.cls_embedding(x_num.shape[:-1])]
+        if self.backbone.cont_embeddings is not None:
+            tokens.append(self.backbone.cont_embeddings(x_num))
+        tokens.append(cat_tokens)
+        return self.backbone.backbone(torch.cat(tokens, dim=1))
+
+    def forward_gia(self, x_gia: torch.Tensor) -> torch.Tensor:
+        """Differentiable FTTransformer path over simplex-relaxed categorical logits."""
+        x_num = x_gia[:, : self.n_num_features].float()
+        if self.n_cat_features <= 0:
+            return self.backbone(x_num, None)
+        tau = max(float(self.gia_soft_temperature), 1e-8)
+        start = self.n_num_features
+        cat_probs = []
+        for card in self.cat_cardinalities:
+            logits = x_gia[:, start : start + card] / tau
+            cat_probs.append(torch.softmax(logits, dim=1))
+            start += card
+        return self._build_tokens_from_cat_probs(x_num, cat_probs)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """FTTransformer forward.
+
+        Uses native discrete path for standard ordinal input shape
+        [n_num_features + n_cat_features]. Uses differentiable simplex/logit
+        GIA path for expanded input shape [n_num_features + sum(cat_cardinalities)].
+        """
+        if x.shape[1] == self.gia_space_dim and self.n_cat_features > 0:
+            return self.forward_gia(x)
+
+        x_num = x[:, : self.n_num_features].float()
+        if self.n_cat_features <= 0:
+            return self.backbone(x_num, None)
+        x_cat = x[:, self.n_num_features : self.n_num_features + self.n_cat_features]
+        x_cat = torch.clamp(x_cat, min=0.0)
+        x_cat = torch.minimum(x_cat, self.cat_index_max.to(device=x_cat.device, dtype=x_cat.dtype))
+        return self.backbone(x_num, x_cat.long())
 
 
 class ResNetWrapper(ModelWrapper):

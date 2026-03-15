@@ -1,4 +1,5 @@
 target: y
+task: binary
 no_header: false
 missing_values: unkown
 has_test_split: null

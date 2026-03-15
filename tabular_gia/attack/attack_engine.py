@@ -16,7 +16,6 @@ from leakpro.attacks.gia_attacks.invertinggradients import InvertingConfig, Inve
 from leakpro.fl_utils.data_utils import GiaTabularExtension
 from leakpro.fl_utils.gia_optimizers import MetaAdam, MetaSGD
 from leakpro.fl_utils.gia_train import train, train_nostep
-from leakpro.utils.seed import restore_rng_state
 from tabular_gia.metrics.tabular_metrics import (
     compute_reconstruction_metrics,
     prepare_tensors_for_metrics,
@@ -72,7 +71,7 @@ class AttackScheduler:
         if self.attack_schedule == "fixed":
             raw = self.gia_cfg.attack_rounds
             return {int(r) for r in raw if 1 <= int(r) <= total_rounds}
-        if self.attack_schedule in {"log", "logspace"}:
+        if self.attack_schedule == "logspace":
             count = self.gia_cfg.attack_num_checkpoints
             if count == 1:
                 return {total_rounds}
@@ -159,7 +158,7 @@ class AttackScheduler:
             unit_sample_ids = self._sample_fixed_units(
                 num_effective=num_effective,
                 unit_size=unit_size,
-                k_units=int(self.fixed_batch_k),
+                k_units=self.fixed_batch_k,
                 seed=seed,
             )
             self.fixed_batch_loaders[client_idx] = [self._build_fixed_batch_loader(client_loader, ids) for ids in unit_sample_ids]
@@ -170,7 +169,6 @@ class AttackRunner:
         self,
         *,
         train_fn: object,
-        mismatch_label: str,
         attack_cfg_base: InvertingConfig,
         feature_schema: dict,
         seed: int,
@@ -178,26 +176,14 @@ class AttackRunner:
         attack_mode: str,
     ) -> None:
         self.train_fn = train_fn
-        self.mismatch_label = mismatch_label
         self.attack_cfg_base = attack_cfg_base
         self.feature_schema = feature_schema
-        self.seed = int(seed)
+        self.seed = seed
         self.debug_dir = results_dir / "debug"
         self.debug_dir.mkdir(parents=True, exist_ok=True)
         self.attack_mode = attack_mode
         self.attack_id_counter = 0
         self.attack_rows: list[dict] = []
-
-    def _assert_update_match(self, expected_updates: list, attack_updates: list) -> None:
-        if len(expected_updates) != len(attack_updates):
-            raise AssertionError(
-                f"{self.mismatch_label} length mismatch: client={len(expected_updates)} attacker={len(attack_updates)}"
-            )
-        for idx, (expected, actual) in enumerate(zip(expected_updates, attack_updates)):
-            if expected is None or actual is None:
-                continue
-            if not torch.allclose(expected, actual, atol=1e-6, rtol=1e-5):
-                raise AssertionError(f"{self.mismatch_label} mismatch at param {idx}")
 
     def run_attack(
         self,
@@ -207,8 +193,6 @@ class AttackRunner:
         round_idx: int,
         client_idx: int,
         client_updates,
-        rng_pre,
-        rng_post,
         fixed_batch_id: int,
         checkpoint_type: str,
         checkpoint_label: str,
@@ -225,15 +209,9 @@ class AttackRunner:
             None,
             train_fn=self.train_fn,
             configs=attack_cfg,
+            observed_client_gradient=client_updates,
         )
-        if rng_pre is not None:
-            attacker.replay_rng_state = rng_pre
         attacker.prepare_attack()
-        if rng_post is not None:
-            restore_rng_state(rng_post)
-
-        if client_updates is not None:
-            self._assert_update_match(client_updates, attacker.client_gradient)
 
         total_iters = int(attack_cfg.at_iterations or 0)
         last_i = -1
@@ -331,13 +309,10 @@ class AttackEngine:
         )
         if protocol == "fedsgd":
             train_fn = train_nostep
-            mismatch_label = "Gradient"
         else:
             train_fn = train
-            mismatch_label = "Delta"
         self.runner = AttackRunner(
             train_fn=train_fn,
-            mismatch_label=mismatch_label,
             attack_cfg_base=attack_cfg_base,
             feature_schema=feature_schema,
             seed=seed,
@@ -353,7 +328,7 @@ class AttackEngine:
         *,
         model: torch.nn.Module,
         round_idx: int,
-        attack_payloads: list[tuple[DataLoader, int, list | None, dict | None, dict | None]],
+        attack_payloads: list[tuple[DataLoader, int, list | None]],
         exp_min_prev: float,
         exp_min_curr: float,
         current_exposures: list[float],
@@ -371,7 +346,7 @@ class AttackEngine:
             return
         checkpoint_type, checkpoint_label = checkpoint
 
-        for batch_loader, client_idx, client_updates, rng_pre, rng_post in attack_payloads:
+        for batch_loader, client_idx, client_updates in attack_payloads:
             client_idx = int(client_idx)
             attack_context = {
                 "exp_min": float(exp_min),
@@ -388,8 +363,6 @@ class AttackEngine:
                         round_idx=int(round_idx),
                         client_idx=client_idx,
                         client_updates=None,
-                        rng_pre=None,
-                        rng_post=None,
                         fixed_batch_id=int(fixed_batch_id),
                         checkpoint_type=checkpoint_type,
                         checkpoint_label=checkpoint_label,
@@ -402,8 +375,6 @@ class AttackEngine:
                 round_idx=int(round_idx),
                 client_idx=client_idx,
                 client_updates=client_updates,
-                rng_pre=rng_pre,
-                rng_post=rng_post,
                 fixed_batch_id=-1,
                 checkpoint_type=checkpoint_type,
                 checkpoint_label=checkpoint_label,

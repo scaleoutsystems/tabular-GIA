@@ -1,4 +1,5 @@
-target: median_house_value
+target: MedHouseVal
+task: regression
 no_header: false
 missing_values: ""
 has_test_split: null

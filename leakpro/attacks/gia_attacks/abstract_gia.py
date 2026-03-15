@@ -179,6 +179,9 @@ class AbstractGIA(AbstractAttack):
 
             # Re-collect tensor from best reconstruction snapshot
             recon_tensor = best_reconstruction_tensor
+            if recon_tensor.shape != orig_tensor.shape and hasattr(self, "model") and hasattr(self.model, "from_gia_space"):
+                with torch.no_grad():
+                    recon_tensor = self.model.from_gia_space(recon_tensor)
 
             mse = torch.mean((orig_tensor - recon_tensor) ** 2).item()
             mae = torch.mean(torch.abs(orig_tensor - recon_tensor)).item()

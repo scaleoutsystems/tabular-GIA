@@ -12,6 +12,7 @@ from torch.nn import CrossEntropyLoss, Module
 from torch.utils.data import DataLoader
 
 from leakpro.attacks.gia_attacks.abstract_gia import AbstractGIA
+from leakpro.fl_utils.data_utils import CustomTensorDataset
 from leakpro.fl_utils.data_utils import GiaImageExtension, GiaTabularExtension
 from leakpro.fl_utils.gia_optimizers import MetaSGD
 from leakpro.fl_utils.gia_train import train
@@ -22,7 +23,6 @@ from leakpro.fl_utils.similarity_measurements import (
 from leakpro.metrics.attack_result import GIAResults
 from leakpro.utils.import_helper import Callable, Self
 from leakpro.utils.logger import logger
-from leakpro.utils.seed import capture_rng_state, restore_rng_state
 
 
 @dataclass
@@ -54,9 +54,17 @@ class InvertingConfig:
 class InvertingGradients(AbstractGIA):
     """Gradient inversion attack by Geiping et al."""
 
-    def __init__(self: Self, model: Module, client_loader: DataLoader, data_mean: Tensor, data_std: Tensor,
-                 train_fn: Optional[Callable] = None, configs: Optional[InvertingConfig] = None, optuna_trial_data: list = None
-                 ) -> None:
+    def __init__(
+        self: Self,
+        model: Module,
+        client_loader: DataLoader,
+        data_mean: Tensor,
+        data_std: Tensor,
+        train_fn: Optional[Callable] = None,
+        configs: Optional[InvertingConfig] = None,
+        optuna_trial_data: list = None,
+        observed_client_gradient: Optional[list[Tensor | None]] = None,
+    ) -> None:
         super().__init__()
         self.original_model = model
         self.model = deepcopy(self.original_model)
@@ -67,7 +75,6 @@ class InvertingGradients(AbstractGIA):
         self.configs = configs if configs is not None else InvertingConfig()
         # Keep an untouched optimizer prototype so each replay can start from fresh state.
         self._optimizer_prototype = deepcopy(self.configs.optimizer)
-        self.replay_rng_state = None
         self.is_tabular = False
         self.best_loss = float("inf")
         self.best_reconstruction = None
@@ -77,6 +84,7 @@ class InvertingGradients(AbstractGIA):
         os.makedirs(self.attack_cache_folder_path, exist_ok=True)
         # optuna trial data
         self.optuna_trial_data = optuna_trial_data
+        self.observed_client_gradient = observed_client_gradient
 
         logger.info("Inverting gradient initialized.")
 
@@ -120,15 +128,28 @@ class InvertingGradients(AbstractGIA):
             self.reconstruction_labels,
             self.reconstruction_loader
         ) = self.configs.data_extension.get_at_data(self.client_loader)
+        self.is_tabular = isinstance(self.configs.data_extension, GiaTabularExtension)
+        if self.is_tabular and hasattr(self.model, "to_gia_space"):
+            with torch.no_grad():
+                reconstruction_gia = self.model.to_gia_space(self.reconstruction)
+            self.reconstruction = reconstruction_gia.detach().clone()
+            self.reconstruction_loader = DataLoader(
+                CustomTensorDataset(self.reconstruction, self.reconstruction_labels),
+                batch_size=self.reconstruction_loader.batch_size or 32,
+                shuffle=False,
+                drop_last=self.reconstruction_loader.drop_last,
+            )
         self.reconstruction.requires_grad = True
-        current_state = None
-        if self.replay_rng_state is not None:
-            current_state = capture_rng_state()
-            restore_rng_state(self.replay_rng_state)
-        client_gradient = self.train_fn(self.model, self.client_loader, self._new_meta_optimizer(),
-                                        self.configs.criterion, self.configs.epochs)
-        if current_state is not None:
-            restore_rng_state(current_state)
+        if self.observed_client_gradient is not None:
+            self.client_gradient = [p.detach() if p is not None else None for p in self.observed_client_gradient]
+            return
+        client_gradient = self.train_fn(
+            self.model,
+            self.client_loader,
+            self._new_meta_optimizer(),
+            self.configs.criterion,
+            self.configs.epochs,
+        )
         self.client_gradient = [p.detach() for p in client_gradient]
 
     def run_attack(self:Self) -> Generator[tuple[int, Tensor, GIAResults]]:
@@ -139,7 +160,6 @@ class InvertingGradients(AbstractGIA):
             GIAResults: Container for results on GIA attacks.
 
         """
-        self.is_tabular = isinstance(self.configs.data_extension, GiaTabularExtension)
         return self.generic_attack_loop(self.configs, self.gradient_closure, self.configs.at_iterations, self.reconstruction,
                                 self.data_mean, self.data_std, self.configs.attack_lr, self.configs.median_pooling,
                                 self.client_loader, self.reconstruction_loader, is_tabular=self.is_tabular)
@@ -167,13 +187,8 @@ class InvertingGradients(AbstractGIA):
             optimizer.zero_grad()
             self.model.zero_grad()
 
-            if self.replay_rng_state is not None:
-                current_state = capture_rng_state()
-                restore_rng_state(self.replay_rng_state)
             gradient = self.train_fn(self.model, self.reconstruction_loader, self._new_meta_optimizer(),
                                      self.configs.criterion, self.configs.epochs)
-            if self.replay_rng_state is not None:
-                restore_rng_state(current_state)
             rec_loss = cosine_similarity_weights(gradient, self.client_gradient, self.configs.top10norms)
             if not self.is_tabular:
                 tv_reg = (self.configs.tv_reg * total_variation(self.reconstruction))
