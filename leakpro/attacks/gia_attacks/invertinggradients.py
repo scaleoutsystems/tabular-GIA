@@ -118,7 +118,7 @@ class InvertingGradients(AbstractGIA):
             None
 
         """
-        self.model.train()
+        self.model.eval()
         if hasattr(self.configs, "label_known"):
             setattr(self.configs.data_extension, "label_known", bool(self.configs.label_known))
         (

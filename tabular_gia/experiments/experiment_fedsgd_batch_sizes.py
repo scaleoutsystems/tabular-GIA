@@ -1,4 +1,3 @@
-# tabular_gia/experiments/experiment_template.py
 from typing import Any
 
 from experiments.sweep_runner import SweepExperimentRunner, SweepRunResults
@@ -11,7 +10,7 @@ def build_sweep_cfg() -> dict[str, Any]:
             "seed": 42,
         },
         "grid": {
-            "protocol": ["fedsgd", "fedavg"],
+            "protocol": "fedsgd",
             "seed": [7, 13, 42],
         },
     }
@@ -34,7 +33,9 @@ def build_sweep_cfg() -> dict[str, Any]:
             "min_client_samples": 1,
             "dirichlet_max_attempts": 50,
         },
-        "grid": {},
+        "grid": {
+            "batch_size": [1,2,4,8,16,32,64,128,256]
+        },
     }
 
     model = {
@@ -76,7 +77,7 @@ def build_sweep_cfg() -> dict[str, Any]:
             },
         },
         "grid": {
-            #"preset": ["small", "resnet", "fttransformer"],
+            "preset": ["small", "resnet", "fttransformer"],
         },
     }
 
@@ -136,7 +137,7 @@ def build_sweep_cfg() -> dict[str, Any]:
     }
 
 
-class ExperimentRunner(SweepExperimentRunner):
+class FedSGDBatchSizesRunner(SweepExperimentRunner):
     def __init__(self, sweep_cfg, results_dir, fl_only=False):
         # ignore passed sweep_cfg; use hardcoded experiment config
         super().__init__(sweep_cfg=build_sweep_cfg(), results_dir=results_dir, fl_only=fl_only)

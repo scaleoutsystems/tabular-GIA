@@ -121,7 +121,7 @@ class FTTransformerWrapper(ModelWrapper):
         self.n_num_features = int(n_num_features)
         self.n_cat_features = int(len(cat_cardinalities))
         self.gia_soft_temperature = 1.0
-        self.gia_init_logit_scale = 1.0
+        self.gia_init_logit_scale = 5.0
         self.cat_cardinalities = [int(c) for c in cat_cardinalities]
         self.register_buffer(
             "cat_index_max",
