@@ -389,6 +389,15 @@ class FedAvgTrainer(FLTrainer):
             n_max_eff,
             samples_per_round,
         )
+        logger.info(
+            "FL runtime settings (FedAvg): local_steps=%s local_epochs=%d optimizer=%s lr=%.6g batch_size=%d clients=%d",
+            "all" if local_steps_all else str(local_steps),
+            local_epochs,
+            optimizer_name,
+            lr,
+            batch_size,
+            num_clients,
+        )
 
         model = self.model
         criterion = self.criterion
@@ -633,6 +642,16 @@ class FedSGDTrainer(FLTrainer):
             min_exposure,
             n_max_eff,
             samples_per_round,
+        )
+        logger.info(
+            "FL runtime settings (FedSGD): local_steps=%d local_epochs=%d optimizer=%s lr=%.6g batch_size=%d clients=%d vectorized_clients=%s",
+            local_steps,
+            local_epochs,
+            cfg.optimizer,
+            lr,
+            batch_size,
+            num_clients,
+            cfg.vectorized_clients,
         )
 
         model = self.model

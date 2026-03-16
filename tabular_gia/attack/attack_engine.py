@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 import math
 from copy import deepcopy
+import logging
 from pathlib import Path
 
 import torch
@@ -21,6 +22,8 @@ from tabular_gia.metrics.tabular_metrics import (
     prepare_tensors_for_metrics,
     write_debug_reconstruction_txt,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class AttackScheduler:
@@ -288,6 +291,7 @@ class AttackEngine:
         criterion: torch.nn.Module,
         results_dir: Path,
     ) -> None:
+        self.gia_cfg = gia_cfg
         self.scheduler = AttackScheduler(
             protocol=protocol,
             gia_cfg=gia_cfg,
@@ -319,9 +323,27 @@ class AttackEngine:
             results_dir=results_dir,
             attack_mode=self.scheduler.attack_mode,
         )
+        self.attack_cfg_base = attack_cfg_base
+        logger.info(
+            "Attack engine setup: mode=%s schedule=%s fixed_batch_k=%d auto_checkpoints=%d",
+            self.scheduler.attack_mode,
+            self.scheduler.attack_schedule,
+            self.scheduler.fixed_batch_k,
+            self.gia_cfg.auto_checkpoints,
+        )
 
     def on_attack_init(self, num_rounds: int) -> None:
         self.scheduler.on_num_rounds(int(num_rounds))
+        checkpoints = self.scheduler.checkpoint_rounds
+        checkpoint_count = "all" if checkpoints is None else str(len(checkpoints))
+        logger.info(
+            "Attack schedule initialized: rounds=%d checkpoints=%s at_iterations=%d attack_lr=%.6g label_known=%s",
+            int(num_rounds),
+            checkpoint_count,
+            int(self.attack_cfg_base.at_iterations),
+            float(self.attack_cfg_base.attack_lr),
+            bool(self.attack_cfg_base.label_known),
+        )
 
     def on_attack(
         self,
