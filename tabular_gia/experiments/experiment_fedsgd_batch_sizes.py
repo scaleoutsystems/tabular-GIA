@@ -114,11 +114,11 @@ def build_sweep_cfg() -> dict[str, Any]:
             "fixed_batch_k": 1,
             "attack_schedule": "auto",
             "auto_checkpoints": 5,
-            "attack_exposure_milestones": [0.0, 0.5, 1.0, 2.0, 5.0, 10.0],
+            "attack_exposure_milestones": [0.0, 1.0, 5.0, 10.0, 25.0],
             "vectorized_attacks": True,
             "invertingconfig": {
                 "label_known": True,
-                "attack_lr": 0.03,
+                "attack_lr": 0.06,
                 "at_iterations": 10000,
                 "data_extension": "GiaTabularExtension",
             },

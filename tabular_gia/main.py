@@ -5,6 +5,9 @@ from pathlib import Path
 import sys
 from typing import Any
 
+import os
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
 import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -100,9 +103,6 @@ def main(
         protocol = base_cfg.protocol
 
         seed_everything(base_cfg.seed)
-        torch.use_deterministic_algorithms(True)
-        torch.backends.cudnn.benchmark = False
-        torch.set_float32_matmul_precision("high")
 
         gia_cfg = GiaConfig()
 

@@ -421,9 +421,6 @@ class SweepExperimentRunner:
                 )
 
                 seed_everything(run_seed)
-                torch.use_deterministic_algorithms(True)
-                torch.backends.cudnn.benchmark = False
-                torch.set_float32_matmul_precision("high")
 
                 runtime = build_runtime(run_config)
                 run_result = RunEngine(run_config, runtime).run()
