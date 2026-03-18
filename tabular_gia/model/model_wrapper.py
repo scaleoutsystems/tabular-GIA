@@ -129,11 +129,21 @@ class FTTransformerWrapper(ModelWrapper):
             persistent=False,
         )
         default_kwargs = FTTransformer.get_default_kwargs()
+        small_kwargs = {
+            'n_blocks': 2,
+            'd_block': 128,
+            'attention_n_heads': 4,
+            'attention_dropout': 0.1,
+            'ffn_d_hidden': None,
+            'ffn_d_hidden_multiplier': 1.3333333333333333,
+            'ffn_dropout': 0.1,
+            'residual_dropout': 0.0,
+            }
         self.backbone = FTTransformer(
             n_cont_features=self.n_num_features,
             cat_cardinalities=self.cat_cardinalities,
             d_out=int(d_out),
-            **default_kwargs,
+            **small_kwargs,
         )
 
     @property
