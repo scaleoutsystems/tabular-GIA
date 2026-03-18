@@ -201,6 +201,7 @@ class InvertingGradients(AbstractGIA):
     def _prepare_attack_tabular(self: Self) -> None:
         """Prepare tabular attack tensors and observed gradients."""
         self.configs.data_extension.label_known = self.configs.label_known
+        model_device = next(self.model.parameters()).device
         (
             self.client_loader,
             self.original,
@@ -209,6 +210,7 @@ class InvertingGradients(AbstractGIA):
             self.reconstruction_loader
         ) = self.configs.data_extension.get_at_data(self.client_loader)
 
+        self.reconstruction = self.reconstruction.to(model_device, non_blocking=True)
         if hasattr(self.model, "to_gia_space"):
             with torch.no_grad():
                 if self.reconstruction.dim() == 2:
@@ -223,12 +225,17 @@ class InvertingGradients(AbstractGIA):
                         f"for shape {tuple(self.reconstruction.shape)}"
                     )
             self.reconstruction = reconstruction_gia.detach().clone()
-            self.reconstruction_loader = DataLoader(
-                CustomTensorDataset(self.reconstruction, self.reconstruction_labels),
-                batch_size=self.reconstruction_loader.batch_size or 32,
-                shuffle=False,
-                drop_last=self.reconstruction_loader.drop_last,
-            )
+        if isinstance(self.reconstruction_labels, list):
+            self.reconstruction_labels = [
+                label.to(model_device, non_blocking=True) if isinstance(label, Tensor) else label
+                for label in self.reconstruction_labels
+            ]
+        self.reconstruction_loader = DataLoader(
+            CustomTensorDataset(self.reconstruction, self.reconstruction_labels),
+            batch_size=self.reconstruction_loader.batch_size or 32,
+            shuffle=False,
+            drop_last=self.reconstruction_loader.drop_last,
+        )
         self.reconstruction.requires_grad = True
         if self.observed_client_gradient is not None:
             self.client_gradient = [p.detach() if p is not None else None for p in self.observed_client_gradient]
