@@ -115,6 +115,7 @@ def build_sweep_cfg() -> dict[str, Any]:
             "attack_schedule": "auto",
             "auto_checkpoints": 5,
             "attack_exposure_milestones": [0.0, 0.5, 1.0, 2.0, 5.0, 10.0],
+            "vectorized_attacks": True,
             "invertingconfig": {
                 "label_known": True,
                 "attack_lr": 0.03,
