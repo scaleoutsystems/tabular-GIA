@@ -101,6 +101,79 @@ class AbstractGIA(AbstractAttack):
                             is_tabular: bool = False,
                             chose_best_ssim_as_final: bool = True) -> Generator[tuple[int, Tensor, GIAResults]]:
         """Generic attack loop for GIA's."""
+        if is_tabular:
+            yield from self._generic_attack_loop_tabular(
+                configs=configs,
+                gradient_closure=gradient_closure,
+                at_iterations=at_iterations,
+                reconstruction=reconstruction,
+                attack_lr=attack_lr,
+                client_loader=client_loader,
+                reconstruction_loader=reconstruction_loader,
+            )
+            return
+
+        optimizer = torch.optim.Adam([reconstruction], lr=attack_lr)
+        # reduce LR every 1/3 of total iterations
+        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
+                                                            milestones=[at_iterations // 2.667,
+                                                                        at_iterations // 1.6,
+                                                                        at_iterations // 1.142], gamma=0.1)
+        try:
+            for i in range(at_iterations):
+                # loss function which does training and compares distance from reconstruction training to the real training.
+                closure = gradient_closure(optimizer)
+                pre_step_loader = deepcopy(reconstruction_loader)
+                loss = optimizer.step(closure)
+                scheduler.step()
+                with torch.no_grad():
+                    # force pixels to be in reasonable ranges
+                    reconstruction.data = torch.max(
+                        torch.min(reconstruction, (1 - data_mean) / data_std), -data_mean / data_std
+                        )
+                    if (i +1) % 500 == 0 and median_pooling:
+                        reconstruction.data = MedianPool2d(kernel_size=3, stride=1, padding=1, same=False)(reconstruction)
+                # Choose image who has given least loss
+                if loss < self.best_loss:
+                    self.best_loss = loss
+                    # the loader before the step was the one that gave the good loss value
+                    self.best_reconstruction = deepcopy(pre_step_loader)
+                    self.best_reconstruction_round = i
+                    logger.info(f"New best loss: {loss} on round: {i}")
+                if i % 250 == 0:
+                    logger.info(f"Iteration {i}, loss {loss}")
+                    ssim = dataloaders_ssim_ignite(client_loader, self.best_reconstruction)
+                    if ssim > self.best_sim:
+                        self.final_best = deepcopy(self.best_reconstruction)
+                        self.best_sim = ssim
+                    current_sim = self.best_sim if chose_best_ssim_as_final else ssim
+                    logger.info(f"curent ssim: {self.best_sim}")
+                    yield i, current_sim, None
+        except Exception as e:
+            logger.info(f"Attack stopped due to {e}. \
+                        Saving results.")
+        result = self.final_best if chose_best_ssim_as_final else reconstruction_loader
+        ssim_score = dataloaders_ssim_ignite(client_loader, result)
+        psnr_score = dataloaders_psnr(client_loader, result)
+        logger.info(f"final sim: {ssim_score}")
+        gia_result = GIAResults(client_loader, result,
+                          psnr_score=psnr_score, ssim_score=ssim_score,
+                          data_mean=data_mean, data_std=data_std, config=configs)
+        yield i, ssim_score, gia_result
+
+    def _generic_attack_loop_tabular(
+        self: Self,
+        *,
+        configs: dict,
+        gradient_closure: Callable,
+        at_iterations: int,
+        reconstruction: Tensor,
+        attack_lr: float,
+        client_loader: DataLoader,
+        reconstruction_loader: DataLoader,
+    ) -> Generator[tuple[int, Tensor, GIAResults]]:
+        """Tabular-specific generic attack loop."""
+
         def _loader_from_tensor(recon_tensor: Tensor) -> DataLoader:
             ds_cls = reconstruction_loader.dataset.__class__
             ds = ds_cls(recon_tensor, reconstruction_loader.dataset.labels)
@@ -112,94 +185,94 @@ class AbstractGIA(AbstractAttack):
             )
 
         optimizer = torch.optim.Adam([reconstruction], lr=attack_lr)
-        # Initialize best reconstruction fallback
         best_reconstruction_tensor = reconstruction.detach().clone()
-        if is_tabular:
-            # Avoid rebuilding DataLoader objects in the tabular hot loop.
-            self.best_reconstruction = None
-            self.final_best = None
-        else:
-            self.best_reconstruction = _loader_from_tensor(best_reconstruction_tensor)
-            self.final_best = self.best_reconstruction
-        # reduce LR every 1/3 of total iterations
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
-                                                            milestones=[at_iterations // 2.667,
-                                                                        at_iterations // 1.6,
-                                                                        at_iterations // 1.142], gamma=0.1)
+        best_client_losses = None
+        per_client_tracking = reconstruction.dim() > 2
+        if per_client_tracking:
+            best_client_losses = torch.full(
+                (int(reconstruction.shape[0]),),
+                float("inf"),
+                device=reconstruction.device,
+            )
+            if hasattr(self, "vectorized_best_client_losses"):
+                self.vectorized_best_client_losses = best_client_losses.detach().clone()
+
+        # Avoid rebuilding DataLoader objects in the tabular hot loop.
+        self.best_reconstruction = None
+        self.final_best = None
+        #scheduler = torch.optim.lr_scheduler.MultiStepLR(
+        #    optimizer,
+        #    milestones=[at_iterations // 2.667, at_iterations // 1.6, at_iterations // 1.142],
+        #    gamma=0.1,
+        #)
+        scheduler = torch.optim.lr_scheduler.LinearLR(
+            optimizer,
+            start_factor=1.0,
+            end_factor=0.1,
+            total_iters=max(1, int(at_iterations)),
+        )
         try:
             for i in range(at_iterations):
-                # loss function which does training and compares distance from reconstruction training to the real training.
                 closure = gradient_closure(optimizer)
                 pre_step_reconstruction = reconstruction.detach().clone()
                 loss = optimizer.step(closure)
                 loss_value = float(loss.detach().item())
                 scheduler.step()
-                with torch.no_grad():
-                    if not is_tabular:
-                        reconstruction.data = torch.max(
-                            torch.min(reconstruction, (1 - data_mean) / data_std), -data_mean / data_std
-                            )
-                        if (i +1) % 500 == 0 and median_pooling:
-                            reconstruction.data = MedianPool2d(kernel_size=3, stride=1, padding=1, same=False)(reconstruction)
-                # Choose image who has given least loss
+                if (
+                    per_client_tracking
+                    and best_client_losses is not None
+                    and hasattr(self, "vectorized_last_client_losses")
+                    and self.vectorized_last_client_losses is not None
+                ):
+                    with torch.no_grad():
+                        current_client_losses = self.vectorized_last_client_losses.to(best_client_losses.device)
+                        improved = current_client_losses < best_client_losses
+                        if torch.any(improved):
+                            best_client_losses = torch.minimum(best_client_losses, current_client_losses)
+                            best_reconstruction_tensor[improved] = pre_step_reconstruction[improved]
+                            if hasattr(self, "vectorized_best_client_losses"):
+                                self.vectorized_best_client_losses = best_client_losses.detach().clone()
+
                 if loss_value < self.best_loss:
                     self.best_loss = loss_value
-                    # the loader before the step was the one that gave the good loss value
-                    best_reconstruction_tensor = pre_step_reconstruction
-                    if not is_tabular:
-                        self.best_reconstruction = _loader_from_tensor(best_reconstruction_tensor)
+                    if best_client_losses is None:
+                        best_reconstruction_tensor = pre_step_reconstruction
+                    # This remains a global best-loss iteration marker (not per-client best round).
                     self.best_reconstruction_round = i
                     logger.info(f"New best loss: {self.best_loss} on round: {i}")
 
-                # Enforce constraints if data extension supports it (e.g., Tabular)
-                #if i % 100 == 0 and hasattr(configs.data_extension, 'enforce_constraints'):
-                #    reconstruction.data = configs.data_extension.enforce_constraints(reconstruction.data)
-
                 if i % 250 == 0:
                     logger.info(f"Iteration {i}, loss {loss_value}")
-                    if is_tabular:
-                        # For tabular, track the best loss as similarity proxy
-                        yield i, -self.best_loss, None
-                    else:
-                        ssim = dataloaders_ssim_ignite(client_loader, self.best_reconstruction)
-                        if ssim > self.best_sim:
-                            self.final_best = deepcopy(self.best_reconstruction)
-                            self.best_sim = ssim
-                        current_sim = self.best_sim if chose_best_ssim_as_final else ssim
-                        logger.info(f"current ssim: {self.best_sim}")
-                        yield i, current_sim, None
+                    # For tabular, track the best loss as similarity proxy.
+                    yield i, -self.best_loss, None
         except Exception as e:
             logger.info(f"Attack stopped due to {e}. \
                         Saving results.")
-        if is_tabular:
-            # Build once after optimization to keep downstream interfaces unchanged.
-            self.best_reconstruction = _loader_from_tensor(best_reconstruction_tensor)
-            # Compute simple tabular reconstruction metrics
-            orig_tensor = torch.cat([batch[0] for batch in client_loader], dim=0)
 
-            # Re-collect tensor from best reconstruction snapshot
-            recon_tensor = best_reconstruction_tensor
-            if recon_tensor.shape != orig_tensor.shape and hasattr(self, "model") and hasattr(self.model, "from_gia_space"):
-                with torch.no_grad():
-                    recon_tensor = self.model.from_gia_space(recon_tensor)
+        self.best_reconstruction = _loader_from_tensor(best_reconstruction_tensor)
+        if per_client_tracking:
+            yield i, -self.best_loss, None
+            return
 
-            mse = torch.mean((orig_tensor - recon_tensor) ** 2).item()
-            mae = torch.mean(torch.abs(orig_tensor - recon_tensor)).item()
-            rmse = mse ** 0.5
-            gia_result = GIAResults(client_loader, self.best_reconstruction,
-                                    psnr_score=None, ssim_score=None,
-                                    data_mean=None, data_std=None, config=configs,
-                                    images=False, rmse_score=rmse, mae_score=mae, is_tabular=True)
-            yield i, -self.best_loss, gia_result
-        else:
-            result = self.final_best if chose_best_ssim_as_final else reconstruction_loader
-            ssim_score = dataloaders_ssim_ignite(client_loader, result)
-            psnr_score = dataloaders_psnr(client_loader, result)
-            logger.info(f"final sim: {ssim_score}")
-            gia_result = GIAResults(client_loader, result,
-                              psnr_score=psnr_score, ssim_score=ssim_score,
-                              data_mean=data_mean, data_std=data_std, config=configs)
-            yield i, ssim_score, gia_result
+        orig_tensor = torch.cat([batch[0] for batch in client_loader], dim=0)
+        recon_tensor = best_reconstruction_tensor
+        if recon_tensor.shape != orig_tensor.shape and hasattr(self, "model") and hasattr(self.model, "from_gia_space"):
+            with torch.no_grad():
+                recon_tensor = self.model.from_gia_space(recon_tensor)
+
+        mse = torch.mean((orig_tensor - recon_tensor) ** 2).item()
+        mae = torch.mean(torch.abs(orig_tensor - recon_tensor)).item()
+        rmse = mse ** 0.5
+        gia_result = GIAResults(
+            client_loader, self.best_reconstruction,
+            psnr_score=None, ssim_score=None,
+            data_mean=None, data_std=None,
+            config=configs,
+            images=False,
+            rmse_score=rmse, mae_score=mae,
+            is_tabular=True,
+        )
+        yield i, -self.best_loss, gia_result
 
 
     def generic_attack_loop_text(self: Self, configs:dict, gradient_closure: Callable, at_iterations: int,

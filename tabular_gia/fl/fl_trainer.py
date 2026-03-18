@@ -407,6 +407,8 @@ class FedAvgTrainer(FLTrainer):
         next_val_exposure = 1.0 if self.val_loader is not None else float("inf")
         executed_rounds = 0
         exp_min_prev = 0.0
+        exp_avg_prev = 0.0
+        exp_max_prev = 0.0
 
         def next_batch(client_idx: int):
             try:
@@ -455,11 +457,8 @@ class FedAvgTrainer(FLTrainer):
                         attack_payloads.append((batch_loader, client_idx, deltas))
 
                 current_exposures, exp_min_curr, exp_avg_curr, exp_max_curr = self._exposure_stats(examples_seen, client_n_eff)
-                crossed_val_checkpoint, next_val_exposure = self._next_val_checkpoint(
-                    float(exp_min_prev),
-                    float(next_val_exposure),
-                    float(exp_min_curr),
-                )
+                crossed_val_checkpoint, next_val_exposure = self._next_val_checkpoint( float(exp_min_prev), float(next_val_exposure), float(exp_min_curr))
+
                 if self.callbacks.attack_fn is not None and attack_payloads is not None:
                     self.callbacks.attack_fn(
                         model=self.model,
@@ -468,13 +467,16 @@ class FedAvgTrainer(FLTrainer):
                         exp_min_prev=float(exp_min_prev),
                         exp_min_curr=float(exp_min_curr),
                         current_exposures=current_exposures,
-                        exp_min=float(exp_min_curr),
-                        exp_avg=float(exp_avg_curr),
-                        exp_max=float(exp_max_curr),
+                        exp_min=float(exp_min_prev),
+                        exp_avg=float(exp_avg_prev),
+                        exp_max=float(exp_max_prev),
                     )
-                exp_min_prev = exp_min_curr
 
                 self._fedavg_train(model, client_updates)
+
+                exp_min_prev = exp_min_curr
+                exp_avg_prev = exp_avg_curr
+                exp_max_prev = exp_max_curr
 
                 if crossed_val_checkpoint:
                     train_stats = self._eval(self.client_dataloaders)
@@ -514,6 +516,7 @@ class FedSGDTrainer(FLTrainer):
     ) -> list[torch.Tensor | None]:
         """Fast FL-only variant of gia_train.train_nostep with first-order gradients only."""
         gpu_or_cpu = next(model.parameters()).device
+        model.to(gpu_or_cpu)
         outputs = None
         params = list(model.parameters())
         grads = None
@@ -538,12 +541,13 @@ class FedSGDTrainer(FLTrainer):
     def train_nostep_fast_vectorized(
         self,
         model,
-        inputs_by_client: torch.Tensor,
-        labels_by_client: torch.Tensor,
+        data: DataLoader,
         criterion,
         epochs: int,
     ) -> list[torch.Tensor | None]:
         """Vectorized FedSGD gradient extraction across clients using torch.func.vmap."""
+        gpu_or_cpu = next(model.parameters()).device
+        model.to(gpu_or_cpu)
         named_params = list(model.named_parameters())
         trainable_pos = [idx for idx, (_, p) in enumerate(named_params) if p.requires_grad]
         num_params = len(named_params)
@@ -566,11 +570,18 @@ class FedSGDTrainer(FLTrainer):
         client_gradients_trainable: tuple[torch.Tensor, ...] = tuple()
         with bn_eval_mode(model):
             for _ in range(epochs):
-                client_gradients_trainable = vmap(
-                    grad_fn,
-                    in_dims=(None, 0, 0),
-                    randomness="different",
-                )(trainable_params, inputs_by_client, labels_by_client)
+                for inputs_by_client, labels_by_client in data:
+                    inputs_by_client = inputs_by_client.to(gpu_or_cpu, non_blocking=True)
+                    labels_by_client = (
+                        labels_by_client.to(gpu_or_cpu, non_blocking=True)
+                        if isinstance(labels_by_client, torch.Tensor)
+                        else torch.as_tensor(labels_by_client, device=gpu_or_cpu)
+                    )
+                    client_gradients_trainable = vmap(
+                        grad_fn,
+                        in_dims=(None, 0, 0),
+                        randomness="different",
+                    )(trainable_params, inputs_by_client, labels_by_client)
         client_gradients = [None for _ in range(num_params)]
         for pos, grad in zip(trainable_pos, client_gradients_trainable):
             client_gradients[pos] = grad
@@ -662,6 +673,8 @@ class FedSGDTrainer(FLTrainer):
         next_val_exposure = 1.0 if self.val_loader is not None else float("inf")
         executed_rounds = 0
         exp_min_prev = 0.0
+        exp_avg_prev = 0.0
+        exp_max_prev = 0.0
         use_vectorized_clients = cfg.vectorized_clients
 
         def next_batch(client_idx: int):
@@ -718,10 +731,14 @@ class FedSGDTrainer(FLTrainer):
                         gpu_or_cpu = next(model.parameters()).device
                         inputs_by_client = torch.stack(per_client_inputs, dim=0).to(gpu_or_cpu, non_blocking=True)
                         labels_by_client = torch.stack(per_client_labels, dim=0).to(gpu_or_cpu, non_blocking=True)
+                        vectorized_loader = DataLoader(
+                            TensorDataset(inputs_by_client, labels_by_client),
+                            batch_size=int(inputs_by_client.shape[0]),
+                            shuffle=False,
+                        )
                         client_gradients = self.train_nostep_fast_vectorized(
                             model=model,
-                            inputs_by_client=inputs_by_client,
-                            labels_by_client=labels_by_client,
+                            data=vectorized_loader,
                             criterion=criterion,
                             epochs=local_epochs,
                         )
@@ -789,16 +806,19 @@ class FedSGDTrainer(FLTrainer):
                         exp_min_prev=float(exp_min_prev),
                         exp_min_curr=float(exp_min_curr),
                         current_exposures=current_exposures,
-                        exp_min=float(exp_min_curr),
-                        exp_avg=float(exp_avg_curr),
-                        exp_max=float(exp_max_curr),
+                        exp_min=float(exp_min_prev),
+                        exp_avg=float(exp_avg_prev),
+                        exp_max=float(exp_max_prev),
                     )
-                exp_min_prev = exp_min_curr
 
                 if vectorized_this_round and client_gradients is not None:
                     self._fedsgd_train_vectorized(model, client_gradients, lr)
                 else:
                     self._fedsgd_train(model, client_gradients_list, lr)
+
+                exp_min_prev = exp_min_curr
+                exp_avg_prev = exp_avg_curr
+                exp_max_prev = exp_max_curr
 
                 if crossed_val_checkpoint:
                     train_stats = self._eval(self.client_dataloaders)

@@ -15,7 +15,7 @@ from leakpro.attacks.gia_attacks.abstract_gia import AbstractGIA
 from leakpro.fl_utils.data_utils import CustomTensorDataset
 from leakpro.fl_utils.data_utils import GiaImageExtension, GiaTabularExtension
 from leakpro.fl_utils.gia_optimizers import MetaSGD
-from leakpro.fl_utils.gia_train import train
+from leakpro.fl_utils.gia_train import train, train_nostep_vectorized
 from leakpro.fl_utils.similarity_measurements import (
     cosine_similarity_weights,
     total_variation,
@@ -73,9 +73,6 @@ class InvertingGradients(AbstractGIA):
         self.data_mean = data_mean
         self.data_std = data_std
         self.configs = configs if configs is not None else InvertingConfig()
-        # Keep an untouched optimizer prototype so each replay can start from fresh state.
-        self._optimizer_prototype = deepcopy(self.configs.optimizer)
-        self.is_tabular = False
         self.best_loss = float("inf")
         self.best_reconstruction = None
         self.best_reconstruction_round = None
@@ -84,13 +81,15 @@ class InvertingGradients(AbstractGIA):
         os.makedirs(self.attack_cache_folder_path, exist_ok=True)
         # optuna trial data
         self.optuna_trial_data = optuna_trial_data
+
+        # tabular
+        self.is_tabular = False
+        self._optimizer_prototype = deepcopy(self.configs.optimizer)
         self.observed_client_gradient = observed_client_gradient
+        self.vectorized_last_client_losses: Optional[Tensor] = None
+        self.vectorized_best_client_losses: Optional[Tensor] = None
 
         logger.info("Inverting gradient initialized.")
-
-    def _new_meta_optimizer(self) -> object:
-        """Return a fresh meta-optimizer with reset internal state."""
-        return deepcopy(self._optimizer_prototype)
 
     def description(self:Self) -> dict:
         """Return a description of the attack."""
@@ -119,8 +118,10 @@ class InvertingGradients(AbstractGIA):
 
         """
         self.model.eval()
-        if hasattr(self.configs, "label_known"):
-            setattr(self.configs.data_extension, "label_known", bool(self.configs.label_known))
+        self.is_tabular = isinstance(self.configs.data_extension, GiaTabularExtension)
+        if self.is_tabular:
+            self._prepare_attack_tabular()
+            return
         (
             self.client_loader,
             self.original,
@@ -128,25 +129,11 @@ class InvertingGradients(AbstractGIA):
             self.reconstruction_labels,
             self.reconstruction_loader
         ) = self.configs.data_extension.get_at_data(self.client_loader)
-        self.is_tabular = isinstance(self.configs.data_extension, GiaTabularExtension)
-        if self.is_tabular and hasattr(self.model, "to_gia_space"):
-            with torch.no_grad():
-                reconstruction_gia = self.model.to_gia_space(self.reconstruction)
-            self.reconstruction = reconstruction_gia.detach().clone()
-            self.reconstruction_loader = DataLoader(
-                CustomTensorDataset(self.reconstruction, self.reconstruction_labels),
-                batch_size=self.reconstruction_loader.batch_size or 32,
-                shuffle=False,
-                drop_last=self.reconstruction_loader.drop_last,
-            )
         self.reconstruction.requires_grad = True
-        if self.observed_client_gradient is not None:
-            self.client_gradient = [p.detach() if p is not None else None for p in self.observed_client_gradient]
-            return
         client_gradient = self.train_fn(
             self.model,
             self.client_loader,
-            self._new_meta_optimizer(),
+            self.configs.optimizer,
             self.configs.criterion,
             self.configs.epochs,
         )
@@ -186,16 +173,135 @@ class InvertingGradients(AbstractGIA):
             """
             optimizer.zero_grad()
             self.model.zero_grad()
+            if self.is_tabular:
+                self.vectorized_last_client_losses = None
+                rec_loss = self._tabular_reconstruction_loss()
+                rec_loss.backward()
+                return rec_loss
 
-            gradient = self.train_fn(self.model, self.reconstruction_loader, self._new_meta_optimizer(),
-                                     self.configs.criterion, self.configs.epochs)
+            gradient = self.train_fn(
+                self.model,
+                self.reconstruction_loader,
+                self.configs.optimizer,
+                self.configs.criterion,
+                self.configs.epochs,
+            )
             rec_loss = cosine_similarity_weights(gradient, self.client_gradient, self.configs.top10norms)
-            if not self.is_tabular:
-                tv_reg = (self.configs.tv_reg * total_variation(self.reconstruction))
-                rec_loss += tv_reg
+            tv_reg = (self.configs.tv_reg * total_variation(self.reconstruction))
+            # Add the TV loss term to penalize large variations between pixels, encouraging smoother images.
+            rec_loss += tv_reg
             rec_loss.backward()
             return rec_loss
         return closure
+
+    def _new_meta_optimizer(self) -> object:
+        """Return a fresh meta-optimizer with reset internal state."""
+        return deepcopy(self._optimizer_prototype)
+
+    def _prepare_attack_tabular(self: Self) -> None:
+        """Prepare tabular attack tensors and observed gradients."""
+        self.configs.data_extension.label_known = self.configs.label_known
+        (
+            self.client_loader,
+            self.original,
+            self.reconstruction,
+            self.reconstruction_labels,
+            self.reconstruction_loader
+        ) = self.configs.data_extension.get_at_data(self.client_loader)
+
+        if hasattr(self.model, "to_gia_space"):
+            with torch.no_grad():
+                if self.reconstruction.dim() == 2:
+                    reconstruction_gia = self.model.to_gia_space(self.reconstruction)
+                elif self.reconstruction.dim() == 3:
+                    c, b, d = self.reconstruction.shape
+                    reconstruction_flat = self.reconstruction.reshape(c * b, d)
+                    reconstruction_gia = self.model.to_gia_space(reconstruction_flat).reshape(c, b, -1)
+                else:
+                    raise ValueError(
+                        f"Unexpected tabular reconstruction rank {self.reconstruction.dim()} "
+                        f"for shape {tuple(self.reconstruction.shape)}"
+                    )
+            self.reconstruction = reconstruction_gia.detach().clone()
+            self.reconstruction_loader = DataLoader(
+                CustomTensorDataset(self.reconstruction, self.reconstruction_labels),
+                batch_size=self.reconstruction_loader.batch_size or 32,
+                shuffle=False,
+                drop_last=self.reconstruction_loader.drop_last,
+            )
+        self.reconstruction.requires_grad = True
+        if self.observed_client_gradient is not None:
+            self.client_gradient = [p.detach() if p is not None else None for p in self.observed_client_gradient]
+            return
+        if self.reconstruction.dim() == 3:
+            client_gradient = train_nostep_vectorized(
+                self.model,
+                self.client_loader,
+                self._new_meta_optimizer(),
+                self.configs.criterion,
+                self.configs.epochs,
+            )
+        else:
+            client_gradient = self.train_fn(
+                self.model,
+                self.client_loader,
+                self._new_meta_optimizer(),
+                self.configs.criterion,
+                self.configs.epochs,
+            )
+        self.client_gradient = [p.detach() for p in client_gradient]
+
+    def _tabular_reconstruction_loss(self: Self) -> Tensor:
+        """Compute tabular reconstruction objective, optionally vectorized across clients."""
+        if self.reconstruction.dim() == 2:
+            gradient = self.train_fn(
+                self.model,
+                self.reconstruction_loader,
+                self._new_meta_optimizer(),
+                self.configs.criterion,
+                self.configs.epochs,
+            )
+            return cosine_similarity_weights(gradient, self.client_gradient, self.configs.top10norms)
+
+        if self.reconstruction.dim() != 3:
+            raise ValueError(
+                f"Tabular attack expects reconstruction rank 2 or 3, got {tuple(self.reconstruction.shape)}"
+            )
+        if self.client_gradient is None:
+            raise ValueError("Missing observed gradients for vectorized tabular attack.")
+        rec_grads_full = train_nostep_vectorized(
+            self.model,
+            self.reconstruction_loader,
+            None, # self._new_meta_optimizer(),
+            self.configs.criterion,
+            self.configs.epochs,
+        )
+
+        if len(rec_grads_full) != len(self.client_gradient):
+            raise ValueError(
+                "Reconstructed and observed gradient lists must have the same length for vectorized tabular attack."
+            )
+
+        client_losses = []
+        num_clients = int(self.reconstruction.shape[0])
+        for c_idx in range(num_clients):
+            rec_client = []
+            obs_client = []
+            for rec_grad, obs_grad in zip(rec_grads_full, self.client_gradient):
+                if rec_grad is None or obs_grad is None:
+                    continue
+                rec_client.append(rec_grad[c_idx])
+                obs_client.append(obs_grad[c_idx])
+            if not rec_client:
+                raise ValueError(
+                    "No aligned parameter gradients available for vectorized tabular cosine loss."
+                )
+            client_losses.append(
+                cosine_similarity_weights(rec_client, obs_client, self.configs.top10norms).reshape(())
+            )
+        per_client_losses = torch.stack(client_losses, dim=0)
+        self.vectorized_last_client_losses = per_client_losses.detach()
+        return per_client_losses.sum()
 
     def _configure_attack(self: Self, configs: dict) -> None:
         pass

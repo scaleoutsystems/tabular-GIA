@@ -79,26 +79,28 @@ def _apply_matching(orig: Tensor, recon: Tensor, labels: Tensor | None) -> tuple
 
 
 def prepare_tensors_for_metrics(
-    attacker: object,
+    original: Tensor,
+    best_reconstruction: DataLoader,
+    reconstruction_labels: object,
+    model: object | None,
     feature_schema: Dict,
     client_idx: int,
 ) -> tuple[Tensor, Tensor, Tensor | None]:
     """Prepare matched and denormalized tensors for reconstruction metrics."""
     num_cols = feature_schema["num_cols"]
 
-    orig_tensor = attacker.original.detach().cpu()
-    recon_tensor = torch.cat([batch[0] for batch in attacker.best_reconstruction], dim=0).detach().cpu()
-    if recon_tensor.shape[1] != orig_tensor.shape[1] and hasattr(attacker, "model") and hasattr(attacker.model, "from_gia_space"):
+    orig_tensor = original.detach().cpu()
+    recon_tensor = torch.cat([batch[0] for batch in best_reconstruction], dim=0).detach().cpu()
+    if recon_tensor.shape[1] != orig_tensor.shape[1] and model is not None and hasattr(model, "from_gia_space"):
         with torch.no_grad():
-            recon_tensor = attacker.model.from_gia_space(recon_tensor).detach().cpu()
+            recon_tensor = model.from_gia_space(recon_tensor).detach().cpu()
 
-    labels = attacker.reconstruction_labels
-    if labels is None:
+    if reconstruction_labels is None:
         label_tensor = None
-    elif isinstance(labels, list):
-        label_tensor = torch.stack(labels).view(-1).detach().cpu()
+    elif isinstance(reconstruction_labels, list):
+        label_tensor = torch.stack(reconstruction_labels).view(-1).detach().cpu()
     else:
-        label_tensor = torch.as_tensor(labels).view(-1).detach().cpu()
+        label_tensor = torch.as_tensor(reconstruction_labels).view(-1).detach().cpu()
 
     orig_tensor, recon_tensor, label_tensor = _apply_matching(orig_tensor, recon_tensor, label_tensor)
 
