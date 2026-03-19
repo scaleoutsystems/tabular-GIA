@@ -4,6 +4,7 @@ from dataclasses import asdict
 import math
 from copy import deepcopy
 import logging
+import os
 from pathlib import Path
 
 import torch
@@ -24,6 +25,25 @@ from tabular_gia.metrics.tabular_metrics import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _tqdm_kwargs(*, offset: int = 0) -> dict:
+    raw_slot = os.environ.get("TABULAR_GIA_TQDM_SLOT")
+    if raw_slot is None:
+        return {}
+    try:
+        slot = int(raw_slot)
+    except ValueError:
+        return {}
+    try:
+        stride = int(os.environ.get("TABULAR_GIA_TQDM_STRIDE", "3"))
+    except ValueError:
+        stride = 3
+    try:
+        base = int(os.environ.get("TABULAR_GIA_TQDM_BASE", "0"))
+    except ValueError:
+        base = 0
+    return {"position": int(base) + (slot * max(1, stride)) + int(offset)}
 
 
 class AttackScheduler:
@@ -220,7 +240,15 @@ class AttackRunner:
 
         total_iters = int(attack_cfg.at_iterations or 0)
         last_i = -1
-        with tqdm(total=total_iters, desc=f"GIA Round {round_idx} Client {client_idx}", leave=False) as bar:
+        tag = os.environ.get("TABULAR_GIA_TQDM_TAG")
+        base_desc = f"GIA Round {round_idx} Client {client_idx}"
+        render_desc = f"{tag} | {base_desc}" if tag else base_desc
+        with tqdm(
+            total=total_iters,
+            desc=render_desc,
+            leave=False,
+            **_tqdm_kwargs(offset=1),
+        ) as bar:
             for i, score, _ in attacker.run_attack():
                 step = max(0, int(i) - last_i)
                 if step:
@@ -274,16 +302,17 @@ class AttackRunner:
         metrics["checkpoint_label"] = checkpoint_label
 
         self.attack_rows.append(metrics)
-        if int(fixed_batch_id) >= 0:
-            tqdm.write(
-                f"GIA done: round={int(round_idx)} client={int(client_idx)} "
-                f"fixed_batch_id={int(fixed_batch_id)} best={float(attacker.best_loss):.6e}"
-            )
-        else:
-            tqdm.write(
-                f"GIA done: round={int(round_idx)} client={int(client_idx)} "
-                f"best={float(attacker.best_loss):.6e}"
-            )
+        if os.environ.get("TABULAR_GIA_TQDM_SLOT") is None:
+            if int(fixed_batch_id) >= 0:
+                tqdm.write(
+                    f"GIA done: round={int(round_idx)} client={int(client_idx)} "
+                    f"fixed_batch_id={int(fixed_batch_id)} best={float(attacker.best_loss):.6e}"
+                )
+            else:
+                tqdm.write(
+                    f"GIA done: round={int(round_idx)} client={int(client_idx)} "
+                    f"best={float(attacker.best_loss):.6e}"
+                )
         return metrics
 
     def run_attack_vectorized(
@@ -365,7 +394,15 @@ class AttackRunner:
         total_iters = int(attacker.configs.at_iterations or 0)
         last_i = -1
         best_loss = float("inf")
-        with tqdm(total=total_iters, desc=f"GIA Round {round_idx} All Clients", leave=False) as bar:
+        tag = os.environ.get("TABULAR_GIA_TQDM_TAG")
+        base_desc = f"GIA Round {round_idx} All Clients"
+        render_desc = f"{tag} | {base_desc}" if tag else base_desc
+        with tqdm(
+            total=total_iters,
+            desc=render_desc,
+            leave=False,
+            **_tqdm_kwargs(offset=1),
+        ) as bar:
             for i, score, _ in attacker.run_attack():
                 step = max(0, int(i) - last_i)
                 if step:
@@ -439,9 +476,10 @@ class AttackRunner:
                 client_best = float(best_client_losses[c_idx].detach().cpu())
             else:
                 client_best = best_loss
-            tqdm.write(
-                f"GIA done: round={int(round_idx)} client={client_idx} best={client_best:.6e}"
-            )
+            if os.environ.get("TABULAR_GIA_TQDM_SLOT") is None:
+                tqdm.write(
+                    f"GIA done: round={int(round_idx)} client={client_idx} best={client_best:.6e}"
+                )
         return rows
 
 

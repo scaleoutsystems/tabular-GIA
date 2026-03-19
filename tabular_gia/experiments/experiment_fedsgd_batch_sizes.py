@@ -1,6 +1,6 @@
 from typing import Any
 
-from experiments.sweep_runner import SweepExperimentRunner, SweepRunResults
+from experiments.sweep_runner import SweepExperimentRunner
 
 
 def build_sweep_cfg() -> dict[str, Any]:
@@ -139,6 +139,12 @@ def build_sweep_cfg() -> dict[str, Any]:
 
 
 class FedSGDBatchSizesRunner(SweepExperimentRunner):
-    def __init__(self, sweep_cfg, results_dir, fl_only=False):
+    def __init__(self, sweep_cfg, results_dir, fl_only=False, max_parallel_groups: int = 1):
         # ignore passed sweep_cfg; use hardcoded experiment config
-        super().__init__(sweep_cfg=build_sweep_cfg(), results_dir=results_dir, fl_only=fl_only)
+        _ = sweep_cfg
+        super().__init__(
+            sweep_cfg=build_sweep_cfg(),
+            results_dir=results_dir,
+            fl_only=fl_only,
+            max_parallel_groups=max_parallel_groups,
+        )

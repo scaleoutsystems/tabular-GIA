@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor
 import itertools
 import json
+import os
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
+from multiprocessing import RLock
 from pathlib import Path
 from typing import Any
 
 from tqdm import tqdm
-import torch
 
 from configs.base import BaseConfig
 from configs.dataset.dataset import DatasetConfig
@@ -49,6 +51,14 @@ class SweepGroupResult:
 class SweepRunResults:
     experiment_dir: Path
     groups: list[SweepGroupResult]
+
+
+@dataclass(frozen=True)
+class GroupExecutionResult:
+    run_record: dict
+    sweep_result_rows_per_seed: list[dict]
+    sweep_result_row_agg: dict | None
+    group_result: SweepGroupResult
 
 
 def _unique_values(values: list[Any]) -> list[Any]:
@@ -343,6 +353,143 @@ def build_run_configs(
     return run_entries
 
 
+def _execute_run_group(
+    run_group_id: int,
+    entries: list[tuple[dict[str, dict[str, Any]], RunConfig]],
+    fl_only: bool,
+    tqdm_slot: int | None = None,
+) -> GroupExecutionResult:
+    if tqdm_slot is None:
+        os.environ.pop("TABULAR_GIA_TQDM_SLOT", None)
+    else:
+        os.environ["TABULAR_GIA_TQDM_SLOT"] = str(int(tqdm_slot))
+    os.environ["TABULAR_GIA_TQDM_STRIDE"] = "2"
+    os.environ["TABULAR_GIA_TQDM_BASE"] = "1"
+
+    first_overrides, first_run_config = entries[0]
+    protocol = first_run_config.base_cfg.protocol
+    seeds = [entry_run_config.base_cfg.seed for _, entry_run_config in entries]
+    run_dir = first_run_config.results_dir.parent.parent
+
+    write_json(
+        run_dir / "run_config.json",
+        {
+            "base": first_run_config.base_cfg.to_dict(),
+            "seeds": seeds,
+            "dataset": first_run_config.dataset_cfg.to_dict(),
+            "model": first_run_config.model_cfg.to_dict(),
+            "gia": {protocol: first_run_config.gia_cfg.to_dict()},
+            "fl": first_run_config.fl_cfg.to_dict(),
+            "overrides": first_overrides,
+        },
+    )
+
+    run_results_for_run: list[RunResult] = []
+    seed_runs: list[SweepSeedRunResult] = []
+    sweep_result_rows_per_seed: list[dict] = []
+
+    for overrides, run_config in entries:
+        run_seed = run_config.base_cfg.seed
+        seed_dir = run_config.results_dir.parent
+        seed_dir.mkdir(parents=True, exist_ok=True)
+        run_tag = f"Run {int(run_group_id)}"
+        os.environ["TABULAR_GIA_TQDM_TAG"] = run_tag
+
+        write_json(
+            seed_dir / "resolved_config.json",
+            {
+                "base": run_config.base_cfg.to_dict(),
+                "dataset": run_config.dataset_cfg.to_dict(),
+                "model": run_config.model_cfg.to_dict(),
+                "gia": {protocol: run_config.gia_cfg.to_dict()},
+                "fl": run_config.fl_cfg.to_dict(),
+                "overrides": overrides,
+            },
+        )
+
+        seed_everything(run_seed)
+
+        runtime = build_runtime(run_config)
+        run_result = RunEngine(run_config, runtime).run()
+        run_results_for_run.append(run_result)
+        seed_runs.append(
+            SweepSeedRunResult(
+                seed=run_seed,
+                run_config=run_config,
+                run_result=run_result,
+            )
+        )
+
+        run_summary = run_result.run_summary
+        if run_summary is None:
+            if not fl_only:
+                raise ValueError(
+                    f"Run summary missing for run_id={run_group_id}, seed={run_seed}. "
+                    "This sweep mode requires run_summary output."
+                )
+            continue
+
+        row = {"run_id": run_group_id, "seed": run_seed}
+        row.update(run_summary)
+        sweep_result_rows_per_seed.append(row)
+
+    seed_summary_builder = SeedSummaryBuilder()
+    csv_writer = SweepResultsWriter()
+    seed_aggregate = seed_summary_builder.build_seed_aggregate(run_results_for_run)
+    csv_writer.write_seed_aggregate(run_dir, seed_aggregate)
+
+    aggregated_run_summary: dict | None = None
+    sweep_result_row_agg: dict | None = None
+    if seed_aggregate.run_summary is None:
+        if not fl_only:
+            raise ValueError(
+                f"Aggregated run summary missing for run_id={run_group_id}. "
+                "This sweep mode requires aggregated run_summary output."
+            )
+    else:
+        aggregated_run_summary = dict(seed_aggregate.run_summary)
+        sweep_result_row_agg = {
+            "run_id": run_group_id,
+            "num_seeds": len(run_results_for_run),
+            **seed_aggregate.run_summary,
+        }
+
+    run_record = {
+        "run_id": run_group_id,
+        "protocol": protocol,
+        "seeds": seeds,
+        "run_dir": str(run_dir),
+        "overrides": first_overrides,
+    }
+    group_result = SweepGroupResult(
+        run_group_id=run_group_id,
+        protocol=protocol,
+        seeds=list(seeds),
+        overrides=deepcopy(first_overrides),
+        run_dir=run_dir,
+        seed_runs=seed_runs,
+        aggregated_run_summary=aggregated_run_summary,
+    )
+
+    return GroupExecutionResult(
+        run_record=run_record,
+        sweep_result_rows_per_seed=sweep_result_rows_per_seed,
+        sweep_result_row_agg=sweep_result_row_agg,
+        group_result=group_result,
+    )
+
+
+def _execute_run_group_from_tuple(
+    task: tuple[int, list[tuple[dict[str, dict[str, Any]], RunConfig]], bool, int | None]
+) -> GroupExecutionResult:
+    run_group_id, entries, fl_only, tqdm_slot = task
+    return _execute_run_group(run_group_id, entries, fl_only, tqdm_slot)
+
+
+def _init_tqdm_worker(lock: object) -> None:
+    tqdm.set_lock(lock)
+
+
 class SweepExperimentRunner:
     def __init__(
         self,
@@ -350,10 +497,14 @@ class SweepExperimentRunner:
         sweep_cfg: dict[str, Any],
         results_dir: Path,
         fl_only: bool = False,
+        max_parallel_groups: int = 1,
     ) -> None:
         self.sweep_cfg = sweep_cfg
         self.results_dir = results_dir
         self.fl_only = fl_only
+        if int(max_parallel_groups) < 1:
+            raise ValueError(f"max_parallel_groups must be >= 1, got {max_parallel_groups}")
+        self.max_parallel_groups = int(max_parallel_groups)
         self.csv_writer = SweepResultsWriter()
         self.seed_summary_builder = SeedSummaryBuilder()
 
@@ -381,110 +532,44 @@ class SweepExperimentRunner:
         sweep_result_rows_agg: list[dict] = []
         group_results: list[SweepGroupResult] = []
 
-        for run_group_id in group_order:
-            entries = grouped_entries[run_group_id]
-            first_overrides, first_run_config = entries[0]
-            protocol = first_run_config.base_cfg.protocol
-            seeds = [entry_run_config.base_cfg.seed for _, entry_run_config in entries]
-            run_dir = first_run_config.results_dir.parent.parent
-
-            write_json(
-                run_dir / "run_config.json",
-                {
-                    "base": first_run_config.base_cfg.to_dict(),
-                    "seeds": seeds,
-                    "dataset": first_run_config.dataset_cfg.to_dict(),
-                    "model": first_run_config.model_cfg.to_dict(),
-                    "gia": {protocol: first_run_config.gia_cfg.to_dict()},
-                    "fl": first_run_config.fl_cfg.to_dict(),
-                    "overrides": first_overrides,
-                },
+        group_tasks = [
+            (
+                run_group_id,
+                grouped_entries[run_group_id],
+                self.fl_only,
+                (idx % self.max_parallel_groups) if self.max_parallel_groups > 1 else None,
             )
-
-            run_results_for_run: list[RunResult] = []
-            seed_runs: list[SweepSeedRunResult] = []
-            for overrides, run_config in entries:
-                run_seed = run_config.base_cfg.seed
-                seed_dir = run_config.results_dir.parent
-                seed_dir.mkdir(parents=True, exist_ok=True)
-
-                write_json(
-                    seed_dir / "resolved_config.json",
-                    {
-                        "base": run_config.base_cfg.to_dict(),
-                        "dataset": run_config.dataset_cfg.to_dict(),
-                        "model": run_config.model_cfg.to_dict(),
-                        "gia": {protocol: run_config.gia_cfg.to_dict()},
-                        "fl": run_config.fl_cfg.to_dict(),
-                        "overrides": overrides,
-                    },
-                )
-
-                seed_everything(run_seed)
-
-                runtime = build_runtime(run_config)
-                run_result = RunEngine(run_config, runtime).run()
-                run_results_for_run.append(run_result)
-                seed_runs.append(
-                    SweepSeedRunResult(
-                        seed=run_seed,
-                        run_config=run_config,
-                        run_result=run_result,
+            for idx, run_group_id in enumerate(group_order)
+        ]
+        execution_results: list[GroupExecutionResult]
+        if self.max_parallel_groups > 1 and len(group_tasks) > 1:
+            tqdm_lock = RLock()
+            with ProcessPoolExecutor(
+                max_workers=self.max_parallel_groups,
+                initializer=_init_tqdm_worker,
+                initargs=(tqdm_lock,),
+            ) as executor:
+                execution_results = list(
+                    tqdm(
+                        executor.map(_execute_run_group_from_tuple, group_tasks),
+                        total=len(group_tasks),
+                        desc="Running sweep groups",
+                        unit="group",
+                        position=0,
                     )
                 )
+        else:
+            execution_results = [
+                _execute_run_group_from_tuple(task)
+                for task in tqdm(group_tasks, total=len(group_tasks), desc="Running sweep groups", unit="group")
+            ]
 
-                run_summary = run_result.run_summary
-                if run_summary is None:
-                    if not self.fl_only:
-                        raise ValueError(
-                            f"Run summary missing for run_id={run_group_id}, seed={run_seed}. "
-                            "This sweep mode requires run_summary output."
-                        )
-                    continue
-
-                row = {"run_id": run_group_id, "seed": run_seed}
-                row.update(run_summary)
-                sweep_result_rows_per_seed.append(row)
-
-            seed_aggregate = self.seed_summary_builder.build_seed_aggregate(run_results_for_run)
-            self.csv_writer.write_seed_aggregate(run_dir, seed_aggregate)
-            aggregated_run_summary: dict | None = None
-            if seed_aggregate.run_summary is None:
-                if not self.fl_only:
-                    raise ValueError(
-                        f"Aggregated run summary missing for run_id={run_group_id}. "
-                        "This sweep mode requires aggregated run_summary output."
-                    )
-            else:
-                aggregated_run_summary = dict(seed_aggregate.run_summary)
-                sweep_result_rows_agg.append(
-                    {
-                        "run_id": run_group_id,
-                        "num_seeds": len(run_results_for_run),
-                        **seed_aggregate.run_summary,
-                    }
-                )
-
-            run_records.append(
-                {
-                    "run_id": run_group_id,
-                    "protocol": protocol,
-                    "seeds": seeds,
-                    "run_dir": str(run_dir),
-                    "overrides": first_overrides,
-                }
-            )
-            group_results.append(
-                SweepGroupResult(
-                    run_group_id=run_group_id,
-                    protocol=protocol,
-                    seeds=list(seeds),
-                    overrides=deepcopy(first_overrides),
-                    run_dir=run_dir,
-                    seed_runs=seed_runs,
-                    aggregated_run_summary=aggregated_run_summary,
-                )
-            )
+        for exec_result in execution_results:
+            run_records.append(exec_result.run_record)
+            sweep_result_rows_per_seed.extend(exec_result.sweep_result_rows_per_seed)
+            if exec_result.sweep_result_row_agg is not None:
+                sweep_result_rows_agg.append(exec_result.sweep_result_row_agg)
+            group_results.append(exec_result.group_result)
 
         with open(experiment_dir / "sweep_runs.json", "w", encoding="utf-8") as f:
             json.dump(run_records, f, indent=2)
