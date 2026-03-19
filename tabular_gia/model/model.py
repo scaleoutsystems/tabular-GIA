@@ -16,8 +16,9 @@ class TabularMLP(ModelWrapper):
         dropout: float,
         activation: str,
         task: str,
+        binary_pos_weight: float | None = None,
     ) -> None:
-        super().__init__(task=task)
+        super().__init__(task=task, binary_pos_weight=binary_pos_weight)
         if n_hidden_layers < 0:
             raise ValueError("n_hidden_layers must be >= 0")
 
