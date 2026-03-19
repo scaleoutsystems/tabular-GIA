@@ -1,4 +1,5 @@
 target: income
+task: binary
 no_header: false
 missing_values: "?"
 has_test_split: null

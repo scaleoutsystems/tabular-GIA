@@ -9,6 +9,7 @@ class FedSGDConfig:
     min_exposure: float = 25.0 # stop when least-exposed client reaches this effective pass count
     optimizer: str = "MetaSGD" # unused: because train_nostep does no optimizer step
     lr: float = 0.01
+    vectorized_clients: bool = True
 
     def to_dict(self) -> dict:
         return asdict(self)

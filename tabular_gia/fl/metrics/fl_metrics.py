@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+import os
 
 import torch
 from sklearn.metrics import average_precision_score, roc_auc_score
@@ -19,6 +20,25 @@ FL_METRIC_FIELDS = (
     "mae",
     "r2",
 )
+
+
+def _tqdm_kwargs(*, offset: int = 0) -> dict:
+    raw_slot = os.environ.get("TABULAR_GIA_TQDM_SLOT")
+    if raw_slot is None:
+        return {}
+    try:
+        slot = int(raw_slot)
+    except ValueError:
+        return {}
+    try:
+        stride = int(os.environ.get("TABULAR_GIA_TQDM_STRIDE", "3"))
+    except ValueError:
+        stride = 3
+    try:
+        base = int(os.environ.get("TABULAR_GIA_TQDM_BASE", "0"))
+    except ValueError:
+        base = 0
+    return {"position": int(base) + (slot * max(1, stride)) + int(offset)}
 
 
 def _f1_binary(tp: int, fp: int, fn: int) -> float:
@@ -106,7 +126,7 @@ def eval(loaders: list[DataLoader], model: torch.nn.Module, criterion: torch.nn.
     binary_scores = []
 
     model.eval()
-    with torch.no_grad():
+    with torch.inference_mode():
         for loader in loaders:
             for xb, yb in loader:
                 xb = xb.to(device, non_blocking=True)
@@ -173,7 +193,17 @@ def eval(loaders: list[DataLoader], model: torch.nn.Module, criterion: torch.nn.
 
 @contextmanager
 def round_bar(total: int, desc: str):
-    bar = tqdm(total=total, desc=desc, unit="round", leave=False)
+    tag = os.environ.get("TABULAR_GIA_TQDM_TAG")
+    render_desc = f"{tag} | {desc}" if tag else desc
+    miniters = max(1, int(total * 0.01))
+    bar = tqdm(
+        total=total,
+        desc=render_desc,
+        unit="round",
+        leave=False,
+        miniters=miniters,
+        **_tqdm_kwargs(offset=0),
+    )
     try:
         yield bar
     finally:
@@ -181,4 +211,6 @@ def round_bar(total: int, desc: str):
 
 
 def progress_write(message: str) -> None:
+    if os.environ.get("TABULAR_GIA_TQDM_SLOT") is not None:
+        return
     tqdm.write(message)

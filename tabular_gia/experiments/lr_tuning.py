@@ -36,7 +36,7 @@ SUMMARY_CSV_FIELDS = (
 def build_sweep_cfg() -> dict[str, Any]:
     base = {
         "default": {
-            "protocol": "fedavg",
+            "protocol": "fedsgd",
             "seed": 42,
         },
         "grid": {
@@ -70,32 +70,32 @@ def build_sweep_cfg() -> dict[str, Any]:
         "default": {
             "preset": "small",
             "arch": "mlp",
-            "d_hidden": 64,
-            "num_layers": 2,
-            "norm": "none",
+            "d_hidden": 32,
+            "n_hidden_layers": 2,
+            "norm": "layernorm",
             "dropout": 0.0,
-            "activation": "relu",
+            "activation": "gelu",
             "presets": {
                 "small": {
                     "arch": "mlp",
-                    "d_hidden": 64,
-                    "num_layers": 2,
+                    "d_hidden": 32,
+                    "n_hidden_layers": 2,
                     "norm": "layernorm",
                     "dropout": 0.0,
                     "activation": "gelu",
                 },
                 "medium": {
                     "arch": "mlp",
-                    "d_hidden": 128,
-                    "num_layers": 3,
+                    "d_hidden": 64,
+                    "n_hidden_layers": 2,
                     "norm": "layernorm",
                     "dropout": 0.1,
                     "activation": "gelu",
                 },
                 "large": {
                     "arch": "mlp",
-                    "d_hidden": 256,
-                    "num_layers": 4,
+                    "d_hidden": 128,
+                    "n_hidden_layers": 3,
                     "norm": "layernorm",
                     "dropout": 0.2,
                     "activation": "gelu",
@@ -106,7 +106,7 @@ def build_sweep_cfg() -> dict[str, Any]:
         },
         "grid": {
             # For LR tuning we keep MLP presets by default.
-            "preset": ["small", "medium", "large", "fttransformer", "resnet"],
+            "preset": ["small", "medium", "large", "resnet", "fttransformer"],
         },
     }
 
@@ -116,9 +116,10 @@ def build_sweep_cfg() -> dict[str, Any]:
                 "local_steps": 1,
                 "local_epochs": 1,
                 "num_clients": 10,
-                "min_exposure": 100.0,
+                "min_exposure": 25.0,
                 "optimizer": "MetaSGD",
                 "lr": 0.01,
+                "vectorized_clients": True,
             },
             "grid": {},
         },
@@ -126,10 +127,10 @@ def build_sweep_cfg() -> dict[str, Any]:
             "default": {
                 "local_steps": "all",
                 "local_epochs": 1,
-                "max_client_dataset_examples": 64,
+                "max_client_dataset_examples": 256,
                 "num_clients": 3,
-                "min_exposure": 100.0,
-                "optimizer": "MetaAdam",
+                "min_exposure": 25.0,
+                "optimizer": "MetaSGD",
                 "lr": 0.01,
             },
             "grid": {},
@@ -141,12 +142,13 @@ def build_sweep_cfg() -> dict[str, Any]:
             "attack_mode": "round_checkpoint",
             "fixed_batch_k": 1,
             "attack_schedule": "auto",
-            "auto_checkpoints": 6,
-            "attack_exposure_milestones": [0.0, 0.5, 1.0, 2.0, 5.0, 10.0],
+            "auto_checkpoints": 5,
+            "attack_exposure_milestones": [0.0, 1.0, 5.0, 10.0, 25.0],
+            "vectorized_attacks": True,
             "invertingconfig": {
                 "label_known": True,
-                "attack_lr": 0.03,
-                "at_iterations": 1,
+                "attack_lr": 0.06,
+                "at_iterations": 10000,
                 "data_extension": "GiaTabularExtension",
             },
         },
@@ -256,10 +258,10 @@ def _write_lr_reports(sweep_results: SweepRunResults, lr_values: list[float]) ->
         if not group.seed_runs:
             continue
 
-        protocol = str(group.protocol)
+        protocol = group.protocol
         first_run_cfg = group.seed_runs[0].run_config
-        model_preset = str(first_run_cfg.model_cfg.preset)
-        lr_value = float(first_run_cfg.fl_cfg.lr)
+        model_preset = first_run_cfg.model_cfg.preset
+        lr_value = first_run_cfg.fl_cfg.lr
 
         objective_metric = ""
         objective_direction = ""

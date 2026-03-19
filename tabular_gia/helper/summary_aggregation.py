@@ -97,7 +97,11 @@ def summarize_round(
     rows = np.array([metric["row_count"] for metric in metrics_list], dtype=float)
     total_rows = float(rows.sum()) if rows.size else 0.0
     weights = rows / total_rows if total_rows > 0 else np.zeros_like(rows)
-    metric_means = _weighted_metric_means(metrics_list, weights, {"client_idx", "row_count"})
+    metric_means = _weighted_metric_means(
+        metrics_list,
+        weights,
+        {"client_idx", "row_count", "round", "num_clients", "total_rows"},
+    )
 
     return {
         "round": int(round_idx),

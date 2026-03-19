@@ -1,4 +1,5 @@
 target: 54
+task: multiclass
 no_header: true
 missing_values: ""
 has_test_split: null

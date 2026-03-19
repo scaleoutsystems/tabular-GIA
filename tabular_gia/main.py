@@ -5,6 +5,9 @@ from pathlib import Path
 import sys
 from typing import Any
 
+import os
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
 import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -73,6 +76,7 @@ def _run_experiment(
     sweep_cfg: dict[str, Any],
     results_dir: Path,
     fl_only: bool,
+    max_parallel_groups: int,
 ) -> None:
     if experiment_name not in EXPERIMENT_RUNNERS:
         names = ", ".join(sorted(EXPERIMENT_RUNNERS.keys()))
@@ -83,6 +87,7 @@ def _run_experiment(
         sweep_cfg=sweep_cfg,
         results_dir=results_dir / "experiments",
         fl_only=fl_only,
+        max_parallel_groups=max_parallel_groups,
     )
     runner.run()
 
@@ -92,6 +97,7 @@ def main(
     results_dir: Path,
     experiment_name: str | None = None,
     fl_only: bool = False,
+    max_parallel_groups: int = 1,
 ) -> None:
     base_cfg = BaseConfig()
     dataset_cfg = DatasetConfig()
@@ -100,9 +106,6 @@ def main(
         protocol = base_cfg.protocol
 
         seed_everything(base_cfg.seed)
-        torch.use_deterministic_algorithms(True)
-        torch.backends.cudnn.benchmark = False
-        torch.set_float32_matmul_precision("high")
 
         gia_cfg = GiaConfig()
 
@@ -130,6 +133,7 @@ def main(
         sweep_cfg=read_yaml(project_root / "configs" / "sweep.yaml"),
         results_dir=results_dir,
         fl_only=fl_only,
+        max_parallel_groups=max_parallel_groups,
     )
 
 
@@ -140,6 +144,14 @@ if __name__ == "__main__":
     parser.add_argument("--results-dir", default=str(project_dir / "results"))
     parser.add_argument("--experiment", default=None)
     parser.add_argument("--fl-only", action="store_true")
+    parser.add_argument(
+        "--max_parallel_groups",
+        "--max_parallell_groups",
+        dest="max_parallel_groups",
+        type=int,
+        default=1,
+        help="Maximum number of experiment run-groups to execute in parallel (experiment mode only).",
+    )
     args = parser.parse_args()
 
     results_dir = Path(args.results_dir)
@@ -150,4 +162,5 @@ if __name__ == "__main__":
         results_dir,
         experiment_name=args.experiment,
         fl_only=args.fl_only,
+        max_parallel_groups=args.max_parallel_groups,
     )

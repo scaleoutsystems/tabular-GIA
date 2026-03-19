@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass, field
 @dataclass
 class InvertingConfig:
     label_known: bool = True
-    attack_lr: float = 0.03
+    attack_lr: float = 0.06
     at_iterations: int = 10000
     data_extension: str = "GiaTabularExtension"
 
@@ -27,11 +27,13 @@ class GiaConfig:
 
     attack_rounds: list[int] = field(default_factory=list) # NOTE: attack_mode: fixed
     attack_num_checkpoints: int = 8 # NOTE: attack_mode: logspace
-    auto_checkpoints: int = 6 # NOTE: attack_mode: auto
-    attack_exposure_milestones: list[float] = field(default_factory=lambda: [0.0, 0.5, 1.0, 2.0, 5.0, 10.0]) # NOTE: attack_mode: exposure
+    auto_checkpoints: int = 5 # NOTE: attack_mode: auto
+    attack_exposure_milestones: list[float] = field(default_factory=lambda: [0.0, 1.0, 5.0, 10.0, 25.0]) # NOTE: attack_mode: exposure
 
     # invertingconfig
     invertingconfig: InvertingConfig = field(default_factory=InvertingConfig)
+
+    vectorized_attacks: bool = True
 
     def to_dict(self) -> dict:
         return asdict(self)

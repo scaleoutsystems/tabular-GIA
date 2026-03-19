@@ -1,18 +1,20 @@
 import logging
 import math
 import random
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Callable
 
 import torch
+from torch.func import functional_call, grad as func_grad, vmap
 from torch.utils.data import DataLoader, TensorDataset
 
 from configs.fl.fedavg import FedAvgConfig
 from configs.fl.fedsgd import FedSGDConfig
 from fl.metrics.fl_metrics import eval, progress_write, round_bar
-from leakpro.fl_utils.gia_optimizers import MetaAdam, MetaSGD
-from leakpro.fl_utils.gia_train import train, train_nostep
-from leakpro.utils.seed import capture_rng_state
+from fl.fl_optimizers import FLAdam, FLOptimizer, FLSGD
+from leakpro.fl_utils.gia_module_to_functional import MetaModule
+from leakpro.fl_utils.model_mode_utils import bn_eval_mode
 
 
 logger = logging.getLogger(__name__)
@@ -282,8 +284,53 @@ class FLTrainer:
             fl_rows=list(self.fl_rows),
         )
 
-
 class FedAvgTrainer(FLTrainer):
+
+    def _build_fl_optimizer(self, optimizer_name: str, lr: float) -> FLOptimizer:
+        if optimizer_name == "MetaSGD":
+            return FLSGD(lr=lr)
+        if optimizer_name == "MetaAdam":
+            return FLAdam(lr=lr)
+        raise ValueError(f"Unsupported optimizer '{optimizer_name}' for FedAvgTrainer.train_fast")
+
+    def train_fast(
+        self,
+        model,
+        data: DataLoader,
+        optimizer: FLOptimizer,
+        criterion,
+        epochs: int,
+    ) -> list[torch.Tensor]:
+        """Fast FL-only variant of gia_train.train with first-order gradients only."""
+        gpu_or_cpu = next(model.parameters()).device
+        patched_model = MetaModule(model)
+        patched_model.parameters = OrderedDict(
+            (name, param.detach().clone().requires_grad_(param.requires_grad))
+            for name, param in patched_model.parameters.items()
+        )
+        outputs = None
+
+        for _ in range(epochs):
+            for inputs, labels in data:
+                inputs, labels = inputs.to(gpu_or_cpu, non_blocking=True), (
+                    labels.to(gpu_or_cpu, non_blocking=True) if isinstance(labels, torch.Tensor) else labels
+                )
+                with bn_eval_mode(patched_model):
+                    outputs = patched_model(inputs, patched_model.parameters)
+                loss = criterion(outputs, labels).sum()
+                patched_model.parameters = optimizer.step(loss, patched_model.parameters)
+                # Keep numerical updates identical while dropping step-to-step autograd history.
+                patched_model.parameters = OrderedDict(
+                    (name, p.detach().requires_grad_(p.requires_grad))
+                    for name, p in patched_model.parameters.items()
+                )
+
+        model_delta = OrderedDict(
+            (name, param - param_origin)
+            for ((name, param), (name_origin, param_origin))
+            in zip(patched_model.parameters.items(), OrderedDict(model.named_parameters()).items())
+        )
+        return list(model_delta.values())
 
     def _fedavg_train(self, global_model, client_updates):
         if not client_updates:
@@ -342,6 +389,15 @@ class FedAvgTrainer(FLTrainer):
             n_max_eff,
             samples_per_round,
         )
+        logger.info(
+            "FL runtime settings (FedAvg): local_steps=%s local_epochs=%d optimizer=%s lr=%.6g batch_size=%d clients=%d",
+            "all" if local_steps_all else str(local_steps),
+            local_epochs,
+            optimizer_name,
+            lr,
+            batch_size,
+            num_clients,
+        )
 
         model = self.model
         criterion = self.criterion
@@ -351,6 +407,8 @@ class FedAvgTrainer(FLTrainer):
         next_val_exposure = 1.0 if self.val_loader is not None else float("inf")
         executed_rounds = 0
         exp_min_prev = 0.0
+        exp_avg_prev = 0.0
+        exp_max_prev = 0.0
 
         def next_batch(client_idx: int):
             try:
@@ -379,25 +437,28 @@ class FedAvgTrainer(FLTrainer):
 
                     inputs_cat = torch.cat([b[0] for b in batches], dim=0)
                     labels_cat = torch.cat([b[1] for b in batches], dim=0)
+
                     batch_ds = TensorDataset(inputs_cat, labels_cat)
                     batch_loader = DataLoader(batch_ds, batch_size=batch_size, shuffle=False)
                     samples_seen = len(labels_cat) * local_epochs
                     examples_seen[client_idx] += samples_seen
 
-                    optimizer = MetaAdam(lr=lr) if optimizer_name == "MetaAdam" else MetaSGD(lr=lr)
-                    rng_pre = capture_rng_state()
-                    deltas = train(model, batch_loader, optimizer, criterion, epochs=local_epochs)
-                    rng_post = capture_rng_state()
+                    fl_optimizer = self._build_fl_optimizer(optimizer_name=optimizer_name, lr=lr)
+                    deltas = self.train_fast(
+                        model=model,
+                        data=batch_loader,
+                        optimizer=fl_optimizer,
+                        criterion=criterion,
+                        epochs=local_epochs,
+                    )
+
                     client_updates.append((deltas, samples_seen))
                     if attack_payloads is not None:
-                        attack_payloads.append((batch_loader, client_idx, deltas, rng_pre, rng_post))
+                        attack_payloads.append((batch_loader, client_idx, deltas))
 
                 current_exposures, exp_min_curr, exp_avg_curr, exp_max_curr = self._exposure_stats(examples_seen, client_n_eff)
-                crossed_val_checkpoint, next_val_exposure = self._next_val_checkpoint(
-                    float(exp_min_prev),
-                    float(next_val_exposure),
-                    float(exp_min_curr),
-                )
+                crossed_val_checkpoint, next_val_exposure = self._next_val_checkpoint( float(exp_min_prev), float(next_val_exposure), float(exp_min_curr))
+
                 if self.callbacks.attack_fn is not None and attack_payloads is not None:
                     self.callbacks.attack_fn(
                         model=self.model,
@@ -406,13 +467,16 @@ class FedAvgTrainer(FLTrainer):
                         exp_min_prev=float(exp_min_prev),
                         exp_min_curr=float(exp_min_curr),
                         current_exposures=current_exposures,
-                        exp_min=float(exp_min_curr),
-                        exp_avg=float(exp_avg_curr),
-                        exp_max=float(exp_max_curr),
+                        exp_min=float(exp_min_prev),
+                        exp_avg=float(exp_avg_prev),
+                        exp_max=float(exp_max_prev),
                     )
-                exp_min_prev = exp_min_curr
 
                 self._fedavg_train(model, client_updates)
+
+                exp_min_prev = exp_min_curr
+                exp_avg_prev = exp_avg_curr
+                exp_max_prev = exp_max_curr
 
                 if crossed_val_checkpoint:
                     train_stats = self._eval(self.client_dataloaders)
@@ -443,28 +507,125 @@ class FedAvgTrainer(FLTrainer):
 
 class FedSGDTrainer(FLTrainer):
 
+    def train_nostep_fast(
+        self,
+        model,
+        data: DataLoader,
+        criterion,
+        epochs: int,
+    ) -> list[torch.Tensor | None]:
+        """Fast FL-only variant of gia_train.train_nostep with first-order gradients only."""
+        gpu_or_cpu = next(model.parameters()).device
+        model.to(gpu_or_cpu)
+        outputs = None
+        params = list(model.parameters())
+        grads = None
+        for _ in range(epochs):
+            for inputs, labels in data:
+                inputs, labels = inputs.to(gpu_or_cpu, non_blocking=True), (
+                    labels.to(gpu_or_cpu, non_blocking=True) if isinstance(labels, torch.Tensor) else labels
+                )
+                with bn_eval_mode(model):
+                    outputs = model(inputs)
+                loss = criterion(outputs, labels).sum()
+                grads = torch.autograd.grad(
+                    loss,
+                    params,
+                    retain_graph=False,
+                    create_graph=False,
+                    only_inputs=True,
+                    allow_unused=True,
+                )
+        return list(grads) if grads is not None else [None for _ in params]
+
+    def train_nostep_fast_vectorized(
+        self,
+        model,
+        data: DataLoader,
+        criterion,
+        epochs: int,
+    ) -> list[torch.Tensor | None]:
+        """Vectorized FedSGD gradient extraction across clients using torch.func.vmap."""
+        gpu_or_cpu = next(model.parameters()).device
+        model.to(gpu_or_cpu)
+        named_params = list(model.named_parameters())
+        trainable_pos = [idx for idx, (_, p) in enumerate(named_params) if p.requires_grad]
+        num_params = len(named_params)
+        if not trainable_pos:
+            return [None for _ in range(num_params)]
+
+        trainable_names = [named_params[idx][0] for idx in trainable_pos]
+        trainable_params = tuple(named_params[idx][1] for idx in trainable_pos)
+        frozen_params = OrderedDict((name, p) for idx, (name, p) in enumerate(named_params) if idx not in trainable_pos)
+        buffers = OrderedDict(model.named_buffers())
+
+        def loss_for_client(trainable_values: tuple[torch.Tensor, ...], x_c: torch.Tensor, y_c: torch.Tensor) -> torch.Tensor:
+            state = OrderedDict(zip(trainable_names, trainable_values))
+            state.update(frozen_params)
+            state.update(buffers)
+            out = functional_call(model, state, (x_c,))
+            return criterion(out, y_c).sum()
+
+        grad_fn = func_grad(loss_for_client)
+        client_gradients_trainable: tuple[torch.Tensor, ...] = tuple()
+        with bn_eval_mode(model):
+            for _ in range(epochs):
+                for inputs_by_client, labels_by_client in data:
+                    inputs_by_client = inputs_by_client.to(gpu_or_cpu, non_blocking=True)
+                    labels_by_client = (
+                        labels_by_client.to(gpu_or_cpu, non_blocking=True)
+                        if isinstance(labels_by_client, torch.Tensor)
+                        else torch.as_tensor(labels_by_client, device=gpu_or_cpu)
+                    )
+                    client_gradients_trainable = vmap(
+                        grad_fn,
+                        in_dims=(None, 0, 0),
+                        randomness="different",
+                    )(trainable_params, inputs_by_client, labels_by_client)
+        client_gradients = [None for _ in range(num_params)]
+        for pos, grad in zip(trainable_pos, client_gradients_trainable):
+            client_gradients[pos] = grad
+        return client_gradients
+
     def _fedsgd_train(self, global_model, client_gradients, lr):
         if not client_gradients:
             return
 
         params = [p for p in global_model.parameters()]
         num_params = len(params)
-        for grads in client_gradients:
-            if len(grads) != num_params:
+        for gradients in client_gradients:
+            if len(gradients) != num_params:
                 raise ValueError("Client gradients do not match model parameters.")
 
         with torch.no_grad():
             for idx, param in enumerate(params):
                 if not param.requires_grad:
                     continue
-                grads = [g for g in (client[idx] for client in client_gradients) if g is not None]
-                if not grads:
+                gradients = [g for g in (client[idx] for client in client_gradients) if g is not None]
+                if not gradients:
                     continue
                 agg = torch.zeros_like(param)
-                for grad in grads:
+                for grad in gradients:
                     agg.add_(grad.detach().to(param.device, dtype=param.dtype))
-                agg.div_(len(grads))
+                agg.div_(len(gradients))
                 param.add_(agg, alpha=-lr)
+
+    def _fedsgd_train_vectorized(self, global_model, client_gradients, lr):
+        if not client_gradients:
+            return
+        params = [p for p in global_model.parameters()]
+        num_params = len(params)
+        if len(client_gradients) != num_params:
+            raise ValueError("Vectorized client gradients do not match model parameters.")
+        with torch.no_grad():
+            for idx, param in enumerate(params):
+                if not param.requires_grad:
+                    continue
+                gradient = client_gradients[idx]
+                if gradient is None:
+                    continue
+                grad_mean = gradient.mean(dim=0)
+                param.add_(grad_mean.detach().to(param.device, dtype=param.dtype), alpha=-lr)
 
     def fit(self, model_wrapper) -> FLTrainResult:
         self._set_model(model_wrapper)
@@ -493,6 +654,16 @@ class FedSGDTrainer(FLTrainer):
             n_max_eff,
             samples_per_round,
         )
+        logger.info(
+            "FL runtime settings (FedSGD): local_steps=%d local_epochs=%d optimizer=%s lr=%.6g batch_size=%d clients=%d vectorized_clients=%s",
+            local_steps,
+            local_epochs,
+            cfg.optimizer,
+            lr,
+            batch_size,
+            num_clients,
+            cfg.vectorized_clients,
+        )
 
         model = self.model
         criterion = self.criterion
@@ -502,6 +673,9 @@ class FedSGDTrainer(FLTrainer):
         next_val_exposure = 1.0 if self.val_loader is not None else float("inf")
         executed_rounds = 0
         exp_min_prev = 0.0
+        exp_avg_prev = 0.0
+        exp_max_prev = 0.0
+        use_vectorized_clients = cfg.vectorized_clients
 
         def next_batch(client_idx: int):
             try:
@@ -518,30 +692,105 @@ class FedSGDTrainer(FLTrainer):
                 active_list = list(range(num_clients))
                 random.shuffle(active_list)
 
-                client_gradients = []
+                client_gradients_list = []
                 attack_payloads = [] if self.callbacks.attack_fn is not None else None
-                for client_idx in active_list:
-                    batches = []
-                    for _ in range(local_steps):
-                        batches.append(next_batch(client_idx))
+                client_gradients = None
+                vectorized_this_round = False
+                prefetched_client_data: list[tuple[int, torch.Tensor, torch.Tensor]] = []
+                if use_vectorized_clients:
+                    per_client_inputs: list[torch.Tensor] = []
+                    per_client_labels: list[torch.Tensor] = []
+                    per_client_loaders: list[DataLoader] | None = [] if attack_payloads is not None else None
+                    per_client_ids: list[int] = []
+                    same_batch_size = True
+                    expected_rows = None
+                    for client_idx in active_list:
+                        batches = []
+                        for _ in range(local_steps):
+                            batches.append(next_batch(client_idx))
 
-                    inputs = torch.cat([b[0] for b in batches], dim=0)
-                    labels = torch.cat([b[1] for b in batches], dim=0)
-                    samples_seen = len(labels) * local_epochs
-                    examples_seen[client_idx] += samples_seen
+                        inputs = torch.cat([b[0] for b in batches], dim=0)
+                        labels = torch.cat([b[1] for b in batches], dim=0)
 
-                    device = next(model.parameters()).device
-                    inputs = inputs.to(device, non_blocking=True)
-                    labels = labels.to(device, non_blocking=True)
-                    batch_ds = TensorDataset(inputs, labels)
-                    batch_loader = DataLoader(batch_ds, batch_size=len(batch_ds), shuffle=False)
+                        rows = int(inputs.shape[0])
+                        if expected_rows is None:
+                            expected_rows = rows
+                        elif rows != expected_rows:
+                            same_batch_size = False
+                        samples_seen = len(labels) * local_epochs
+                        examples_seen[client_idx] += samples_seen
+                        per_client_inputs.append(inputs)
+                        per_client_labels.append(labels)
+                        prefetched_client_data.append((int(client_idx), inputs, labels))
+                        if per_client_loaders is not None:
+                            batch_ds = TensorDataset(inputs, labels)
+                            per_client_loaders.append(DataLoader(batch_ds, batch_size=len(batch_ds), shuffle=False))
+                        per_client_ids.append(int(client_idx))
 
-                    rng_pre = capture_rng_state()
-                    grads = train_nostep(model, batch_loader, MetaSGD(lr), criterion, epochs=local_epochs)
-                    rng_post = capture_rng_state()
-                    client_gradients.append([g.detach() if g is not None else None for g in grads])
-                    if attack_payloads is not None:
-                        attack_payloads.append((batch_loader, client_idx, grads, rng_pre, rng_post))
+                    if same_batch_size and per_client_inputs:
+                        gpu_or_cpu = next(model.parameters()).device
+                        inputs_by_client = torch.stack(per_client_inputs, dim=0).to(gpu_or_cpu, non_blocking=True)
+                        labels_by_client = torch.stack(per_client_labels, dim=0).to(gpu_or_cpu, non_blocking=True)
+                        vectorized_loader = DataLoader(
+                            TensorDataset(inputs_by_client, labels_by_client),
+                            batch_size=int(inputs_by_client.shape[0]),
+                            shuffle=False,
+                        )
+                        client_gradients = self.train_nostep_fast_vectorized(
+                            model=model,
+                            data=vectorized_loader,
+                            criterion=criterion,
+                            epochs=local_epochs,
+                        )
+
+                        first_grad = next((g for g in client_gradients if g is not None), None)
+                        n_client = int(first_grad.shape[0]) if first_grad is not None else len(active_list)
+                        num_params = len(client_gradients)
+                        for c_idx in range(n_client):
+                            grads_full = [None for _ in range(num_params)]
+                            for p_idx, gradient in enumerate(client_gradients):
+                                if gradient is not None:
+                                    grads_full[p_idx] = gradient[c_idx].detach()
+                            client_gradients_list.append(grads_full)
+                            if attack_payloads is not None:
+                                attack_payloads.append(
+                                    (
+                                        per_client_loaders[c_idx],  # type: ignore[index]
+                                        per_client_ids[c_idx],
+                                        grads_full,
+                                    )
+                                )
+                        vectorized_this_round = True
+
+                if not vectorized_this_round:
+                    if prefetched_client_data:
+                        client_batches = prefetched_client_data
+                    else:
+                        client_batches = []
+                        for client_idx in active_list:
+                            batches = []
+                            for _ in range(local_steps):
+                                batches.append(next_batch(client_idx))
+                            inputs = torch.cat([b[0] for b in batches], dim=0)
+                            labels = torch.cat([b[1] for b in batches], dim=0)
+                            samples_seen = len(labels) * local_epochs
+                            examples_seen[client_idx] += samples_seen
+                            client_batches.append((int(client_idx), inputs, labels))
+
+                    for client_idx, inputs, labels in client_batches:
+                        batch_ds = TensorDataset(inputs, labels)
+                        batch_loader = DataLoader(batch_ds, batch_size=len(batch_ds), shuffle=False)
+
+                        grads = self.train_nostep_fast(
+                            model=model,
+                            data=batch_loader,
+                            criterion=criterion,
+                            epochs=local_epochs,
+                        )
+
+                        client_gradients_list.append([g.detach() if g is not None else None for g in grads])
+                        if attack_payloads is not None:
+                            attack_payloads.append((batch_loader, client_idx, grads))
 
                 current_exposures, exp_min_curr, exp_avg_curr, exp_max_curr = self._exposure_stats(examples_seen, client_n_eff)
                 crossed_val_checkpoint, next_val_exposure = self._next_val_checkpoint(
@@ -557,13 +806,19 @@ class FedSGDTrainer(FLTrainer):
                         exp_min_prev=float(exp_min_prev),
                         exp_min_curr=float(exp_min_curr),
                         current_exposures=current_exposures,
-                        exp_min=float(exp_min_curr),
-                        exp_avg=float(exp_avg_curr),
-                        exp_max=float(exp_max_curr),
+                        exp_min=float(exp_min_prev),
+                        exp_avg=float(exp_avg_prev),
+                        exp_max=float(exp_max_prev),
                     )
-                exp_min_prev = exp_min_curr
 
-                self._fedsgd_train(model, client_gradients, lr)
+                if vectorized_this_round and client_gradients is not None:
+                    self._fedsgd_train_vectorized(model, client_gradients, lr)
+                else:
+                    self._fedsgd_train(model, client_gradients_list, lr)
+
+                exp_min_prev = exp_min_curr
+                exp_avg_prev = exp_avg_curr
+                exp_max_prev = exp_max_curr
 
                 if crossed_val_checkpoint:
                     train_stats = self._eval(self.client_dataloaders)

@@ -66,7 +66,7 @@ def build_runtime(config: RunConfig) -> Runtime:
     if config.base_cfg.protocol == "fedavg" and isinstance(config.fl_cfg, FedAvgConfig):
         max_client_dataset_examples = config.fl_cfg.max_client_dataset_examples
 
-    logger.info("Model config: %s", config.model_cfg)
+    logger.debug("Model config: %s", config.model_cfg)
     encoding_mode = ModelWrapper.infer_encoding_mode(config.model_cfg)
     dataset_cfg = deepcopy(config.dataset_cfg)
     dataset_path = Path(dataset_cfg.dataset_path)
@@ -78,6 +78,16 @@ def build_runtime(config: RunConfig) -> Runtime:
     if not dataset_meta_path.is_absolute():
         dataset_meta_path = TABULAR_GIA_ROOT / dataset_meta_path
     dataset_cfg.dataset_meta_path = str(dataset_meta_path)
+    logger.info(
+        "Runtime setup: protocol=%s seed=%d fl_only=%s dataset=%s model_preset=%s encoding=%s num_clients=%d",
+        config.base_cfg.protocol,
+        config.base_cfg.seed,
+        config.fl_only,
+        dataset_path,
+        config.model_cfg.preset,
+        encoding_mode,
+        num_clients,
+    )
 
     client_dataloaders, val_loader, test_loader, feature_schema = load_dataset(
         dataset_cfg=dataset_cfg,
@@ -169,8 +179,43 @@ class RunEngine:
         return trainer.fit(runtime.model_wrapper)
 
     def run(self) -> RunResult:
-        logger.info("RunConfig: %s", self.config)
+        logger.info(
+            "Run start: protocol=%s seed=%d fl_only=%s results_dir=%s",
+            self.config.base_cfg.protocol,
+            self.config.base_cfg.seed,
+            self.config.fl_only,
+            self.results_dir,
+        )
+        logger.debug("RunConfig: %s", self.config)
         fl_cfg = self.config.fl_cfg
+        logger.info(
+            "FL config: num_clients=%d local_steps=%s local_epochs=%d optimizer=%s lr=%.6g",
+            fl_cfg.num_clients,
+            fl_cfg.local_steps,
+            fl_cfg.local_epochs,
+            fl_cfg.optimizer,
+            fl_cfg.lr,
+        )
+        if isinstance(fl_cfg, FedAvgConfig):
+            logger.info(
+                "FedAvg extras: max_client_dataset_examples=%d",
+                fl_cfg.max_client_dataset_examples,
+            )
+        if isinstance(fl_cfg, FedSGDConfig):
+            logger.info(
+                "FedSGD extras: vectorized_clients=%s",
+                fl_cfg.vectorized_clients,
+            )
+        if not self.config.fl_only:
+            gia_inv = self.config.gia_cfg.invertingconfig
+            logger.info(
+                "Attack config: mode=%s schedule=%s at_iterations=%d attack_lr=%.6g label_known=%s",
+                self.config.gia_cfg.attack_mode,
+                self.config.gia_cfg.attack_schedule,
+                gia_inv.at_iterations,
+                gia_inv.attack_lr,
+                gia_inv.label_known,
+            )
 
         callbacks, summary_builder, csv_sink, attack_engine = self._build_callbacks(self.runtime, fl_cfg)
         fl_result = self._run_fl(self.runtime, fl_cfg, callbacks)

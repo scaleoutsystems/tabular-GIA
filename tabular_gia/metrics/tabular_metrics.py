@@ -79,30 +79,35 @@ def _apply_matching(orig: Tensor, recon: Tensor, labels: Tensor | None) -> tuple
 
 
 def prepare_tensors_for_metrics(
-    attacker: object,
+    original: Tensor,
+    best_reconstruction: DataLoader,
+    reconstruction_labels: object,
+    model: object | None,
     feature_schema: Dict,
     client_idx: int,
 ) -> tuple[Tensor, Tensor, Tensor | None]:
     """Prepare matched and denormalized tensors for reconstruction metrics."""
-    num_cols = feature_schema.get("num_cols", [])
+    num_cols = feature_schema["num_cols"]
 
-    orig_tensor = attacker.original.detach().cpu()
-    recon_tensor = torch.cat([batch[0] for batch in attacker.best_reconstruction], dim=0).detach().cpu()
+    orig_tensor = original.detach().cpu()
+    recon_tensor = torch.cat([batch[0] for batch in best_reconstruction], dim=0).detach().cpu()
+    if recon_tensor.shape[1] != orig_tensor.shape[1] and model is not None and hasattr(model, "from_gia_space"):
+        with torch.no_grad():
+            recon_tensor = model.from_gia_space(recon_tensor).detach().cpu()
 
-    labels = attacker.reconstruction_labels
-    if labels is None:
+    if reconstruction_labels is None:
         label_tensor = None
-    elif isinstance(labels, list):
-        label_tensor = torch.stack(labels).view(-1).detach().cpu()
+    elif isinstance(reconstruction_labels, list):
+        label_tensor = torch.stack(reconstruction_labels).view(-1).detach().cpu()
     else:
-        label_tensor = torch.as_tensor(labels).view(-1).detach().cpu()
+        label_tensor = torch.as_tensor(reconstruction_labels).view(-1).detach().cpu()
 
     orig_tensor, recon_tensor, label_tensor = _apply_matching(orig_tensor, recon_tensor, label_tensor)
 
     num_count = len(num_cols)
     if num_count > 0:
-        means = feature_schema.get("client_num_mean", [])
-        stds = feature_schema.get("client_num_std", [])
+        means = feature_schema["client_num_mean"]
+        stds = feature_schema["client_num_std"]
         mean = means[client_idx]
         std = stds[client_idx]
         orig_tensor = denormalize_numeric(orig_tensor, num_count, mean, std)
@@ -118,16 +123,16 @@ def compute_reconstruction_metrics(
     random_baseline_seed: int,
 ) -> Dict:
     """Compute per-row and aggregate reconstruction metrics."""
-    num_cols = feature_schema.get("num_cols", [])
-    cat_cols = feature_schema.get("cat_cols", [])
-    cat_categories = feature_schema.get("cat_categories", {}) or {}
-    encoding_mode = str(feature_schema.get("encoding_mode", "onehot")).strip().lower()
+    num_cols = feature_schema["num_cols"]
+    cat_cols = feature_schema["cat_cols"]
+    cat_categories = feature_schema["cat_categories"]
+    encoding_mode = feature_schema["encoding_mode"].strip().lower()
     num_count = len(num_cols)
     has_num = num_count > 0
     has_cat = len(cat_cols) > 0
     num_std = None
     if has_num:
-        stds = feature_schema.get("client_num_std", [])
+        stds = feature_schema["client_num_std"]
         num_std = np.asarray(stds[client_idx], dtype=np.float32)
 
     num_acc, cat_acc, tableak_acc = _tab_leak_accuracy(
@@ -142,7 +147,12 @@ def compute_reconstruction_metrics(
     nn_dist = _nearest_neighbor_distance(
         recon_tensor,
         orig_tensor,
-        {"num_cols": num_cols, "cat_cols": cat_cols, "cat_categories": cat_categories},
+        {
+            "num_cols": num_cols,
+            "cat_cols": cat_cols,
+            "cat_categories": cat_categories,
+            "encoding_mode": encoding_mode,
+        },
     )
 
     per_row_metrics = {
@@ -215,28 +225,26 @@ def _emr(tableak_acc: np.ndarray, min_tableak_acc: float = 1.0) -> float:
 
 
 def _iter_cat_groups(feature_schema: Dict, total_dim: int, num_count: int) -> list[dict]:
-    encoding_mode = str(feature_schema.get("encoding_mode", "onehot")).strip().lower()
-    cat_cols = feature_schema.get("cat_cols", [])
-    cat_categories = feature_schema.get("cat_categories", {}) or {}
+    encoding_mode = str(feature_schema["encoding_mode"]).strip().lower()
+    cat_cols = feature_schema["cat_cols"]
+    cat_categories = feature_schema["cat_categories"]
     groups: list[dict] = []
     current_idx = num_count
     if encoding_mode == "ordinal":
         for col in cat_cols:
-            cats = cat_categories.get(col, [])
-            if isinstance(cats, dict):
-                cats = cats.get("categories", [])
+            cats = cat_categories[col]
             if current_idx >= total_dim:
-                continue
+                raise ValueError("Feature schema/category layout exceeds tensor dimensions (ordinal mode).")
             groups.append({"name": col, "indices": [current_idx], "cats": cats})
             current_idx += 1
         return groups
     for col in cat_cols:
-        cats = cat_categories.get(col, [])
-        if isinstance(cats, dict):
-            cats = cats.get("categories", [])
+        cats = cat_categories[col]
         n_cats = len(cats)
-        if n_cats <= 0 or current_idx + n_cats > total_dim:
-            continue
+        if n_cats <= 0:
+            raise ValueError(f"Feature schema has empty category list for '{col}'.")
+        if current_idx + n_cats > total_dim:
+            raise ValueError("Feature schema/category layout exceeds tensor dimensions (onehot mode).")
         groups.append({"name": col, "indices": list(range(current_idx, current_idx + n_cats)), "cats": cats})
         current_idx += n_cats
     return groups
@@ -249,33 +257,34 @@ def _prior_baseline_metrics(
     num_std: np.ndarray | None,
 ) -> Dict[str, float]:
     """Compute prior-only baseline reconstruction scores and attack gains."""
-    num_cols = feature_schema.get("num_cols", [])
-    cat_cols = feature_schema.get("cat_cols", [])
+    num_cols = feature_schema["num_cols"]
+    cat_cols = feature_schema["cat_cols"]
     num_count = len(num_cols)
     prior_tensor = torch.zeros_like(orig_tensor)
 
     # Numeric prior: client mean for each numerical feature.
     if num_count > 0:
-        means = feature_schema.get("client_num_mean", [])
-        if client_idx < len(means):
-            mean_arr = np.asarray(means[client_idx], dtype=np.float32)[:num_count]
-            prior_tensor[:, :num_count] = torch.as_tensor(mean_arr, dtype=orig_tensor.dtype, device=orig_tensor.device)
+        means = feature_schema["client_num_mean"]
+        mean_arr = np.asarray(means[client_idx], dtype=np.float32)[:num_count]
+        prior_tensor[:, :num_count] = torch.as_tensor(mean_arr, dtype=orig_tensor.dtype, device=orig_tensor.device)
 
     # Categorical prior: client marginal mode for each categorical feature.
-    client_cat_probs = feature_schema.get("client_cat_probs", [])
-    probs_map = client_cat_probs[client_idx] if client_idx < len(client_cat_probs) else {}
+    client_cat_probs = feature_schema["client_cat_probs"]
+    probs_map = client_cat_probs[client_idx]
     cat_groups = _iter_cat_groups(feature_schema, orig_tensor.shape[1], num_count)
     for group in cat_groups:
         idxs = group["indices"]
         cats = group["cats"]
         n_cats = len(cats)
-        probs = np.asarray(probs_map.get(group["name"], []), dtype=np.float32)
+        probs = np.asarray(probs_map[group["name"]], dtype=np.float32)
         if n_cats <= 0:
-            continue
-        if probs.size != n_cats or float(np.sum(probs)) <= 0:
-            probs = np.full(n_cats, 1.0 / n_cats, dtype=np.float32)
-        else:
-            probs = probs / float(np.sum(probs))
+            raise ValueError(f"Feature schema has empty category list for '{group['name']}'.")
+        if probs.size != n_cats:
+            raise ValueError(f"client_cat_probs size mismatch for '{group['name']}': expected {n_cats}, got {probs.size}")
+        total_prob = float(np.sum(probs))
+        if total_prob <= 0:
+            raise ValueError(f"client_cat_probs for '{group['name']}' must sum to > 0.")
+        probs = probs / total_prob
         best = int(np.argmax(probs))
         if len(idxs) == 1:
             prior_tensor[:, idxs[0]] = float(best)
@@ -288,9 +297,9 @@ def _prior_baseline_metrics(
         prior_tensor,
         num_cols,
         cat_cols,
-        feature_schema.get("cat_categories", {}) or {},
+        feature_schema["cat_categories"],
         num_std,
-        encoding_mode=str(feature_schema.get("encoding_mode", "onehot")).strip().lower(),
+        encoding_mode=str(feature_schema["encoding_mode"]).strip().lower(),
     )
     metrics: Dict[str, float] = {
         "prior_tableak_acc": float(np.nanmean(prior_tableak)),
@@ -308,17 +317,17 @@ def _random_baseline_tensor(
     rng: np.random.Generator,
 ) -> Tensor:
     """Sample an uninformed random reconstruction batch in the same feature space."""
-    num_cols = feature_schema.get("num_cols", [])
+    num_cols = feature_schema["num_cols"]
     num_count = len(num_cols)
     total_dim = orig_tensor.shape[1]
-    encoding_mode = str(feature_schema.get("encoding_mode", "onehot")).strip().lower()
+    encoding_mode = str(feature_schema["encoding_mode"]).strip().lower()
 
     rand_tensor = torch.zeros_like(orig_tensor)
 
     # Numeric: uniform over global train support.
     if num_count > 0:
-        mins = np.asarray(feature_schema.get("train_num_min", []), dtype=np.float32)[:num_count]
-        maxs = np.asarray(feature_schema.get("train_num_max", []), dtype=np.float32)[:num_count]
+        mins = np.asarray(feature_schema["train_num_min"], dtype=np.float32)[:num_count]
+        maxs = np.asarray(feature_schema["train_num_max"], dtype=np.float32)[:num_count]
 
         if len(mins) != num_count or len(maxs) != num_count:
             raise ValueError("Missing or invalid train_num_min/train_num_max in feature_schema.")
@@ -375,9 +384,9 @@ def _random_baseline_metrics(
     seed: int = 0,
 ) -> Dict[str, float]:
     """Compute random baseline reconstruction scores by Monte Carlo sampling."""
-    num_cols = feature_schema.get("num_cols", [])
-    cat_cols = feature_schema.get("cat_cols", [])
-    encoding_mode = str(feature_schema.get("encoding_mode", "onehot")).strip().lower()
+    num_cols = feature_schema["num_cols"]
+    cat_cols = feature_schema["cat_cols"]
+    encoding_mode = str(feature_schema["encoding_mode"]).strip().lower()
 
     rng = np.random.default_rng(seed + 1009 * client_idx + 17 * orig_tensor.shape[0])
 
@@ -396,7 +405,7 @@ def _random_baseline_metrics(
             rand_tensor,
             num_cols,
             cat_cols,
-            feature_schema.get("cat_categories", {}) or {},
+            feature_schema["cat_categories"],
             num_std,
             encoding_mode=encoding_mode,
         )
@@ -427,7 +436,7 @@ def _distribution_confidence_metrics(
     client_idx: int,
 ) -> Dict[str, float]:
     """Estimate how likely the reconstructed batch is under client feature marginals."""
-    num_cols = feature_schema.get("num_cols", [])
+    num_cols = feature_schema["num_cols"]
     num_count = len(num_cols)
     cat_groups = _iter_cat_groups(feature_schema, recon_tensor.shape[1], num_count)
     recon_np = recon_tensor.detach().cpu().numpy()
@@ -436,34 +445,35 @@ def _distribution_confidence_metrics(
     num_within_2std = float("nan")
     num_conf = float("nan")
     if num_count > 0:
-        means = feature_schema.get("client_num_mean", [])
-        stds = feature_schema.get("client_num_std", [])
-        if client_idx < len(means) and client_idx < len(stds):
-            mean = np.asarray(means[client_idx], dtype=np.float32)[:num_count]
-            std = np.asarray(stds[client_idx], dtype=np.float32)[:num_count]
-            std = np.where(std <= 1e-8, 1e-8, std)
-            z = np.abs((recon_np[:, :num_count] - mean[None, :]) / std[None, :])
-            num_within_1std = float(np.mean(z <= 1.0))
-            num_within_2std = float(np.mean(z <= 2.0))
-            # Gaussian-kernel confidence in [0, 1]
-            num_conf = float(np.mean(np.exp(-0.5 * (z ** 2))))
+        means = feature_schema["client_num_mean"]
+        stds = feature_schema["client_num_std"]
+        mean = np.asarray(means[client_idx], dtype=np.float32)[:num_count]
+        std = np.asarray(stds[client_idx], dtype=np.float32)[:num_count]
+        std = np.where(std <= 1e-8, 1e-8, std)
+        z = np.abs((recon_np[:, :num_count] - mean[None, :]) / std[None, :])
+        num_within_1std = float(np.mean(z <= 1.0))
+        num_within_2std = float(np.mean(z <= 2.0))
+        # Gaussian-kernel confidence in [0, 1]
+        num_conf = float(np.mean(np.exp(-0.5 * (z ** 2))))
 
     cat_conf = float("nan")
     if cat_groups:
-        client_cat_probs = feature_schema.get("client_cat_probs", [])
-        probs_map = client_cat_probs[client_idx] if client_idx < len(client_cat_probs) else {}
+        client_cat_probs = feature_schema["client_cat_probs"]
+        probs_map = client_cat_probs[client_idx]
         probs_list: list[np.ndarray] = []
         for group in cat_groups:
             idxs = group["indices"]
             cats = group["cats"]
             n_cats = len(cats)
             if n_cats <= 0:
-                continue
-            probs = np.asarray(probs_map.get(group["name"], []), dtype=np.float32)
-            if probs.size != n_cats or float(np.sum(probs)) <= 0:
-                probs = np.full(n_cats, 1.0 / n_cats, dtype=np.float32)
-            else:
-                probs = probs / float(np.sum(probs))
+                raise ValueError(f"Feature schema has empty category list for '{group['name']}'.")
+            probs = np.asarray(probs_map[group["name"]], dtype=np.float32)
+            if probs.size != n_cats:
+                raise ValueError(f"client_cat_probs size mismatch for '{group['name']}': expected {n_cats}, got {probs.size}")
+            total_prob = float(np.sum(probs))
+            if total_prob <= 0:
+                raise ValueError(f"client_cat_probs for '{group['name']}' must sum to > 0.")
+            probs = probs / total_prob
             if len(idxs) == 1:
                 pred = np.rint(recon_np[:, idxs[0]]).astype(np.int64)
                 pred = np.clip(pred, 0, n_cats - 1)
@@ -491,10 +501,10 @@ def _distribution_confidence_metrics(
 
 def _get_feature_groups(feature_info: Dict, total_dim: int) -> tuple[list[int], list[list[int]]]:
     """Build numeric indices and categorical one-hot groups from encoder metadata."""
-    num_feats = feature_info.get('numerical_features') or feature_info.get('num_cols', [])
-    cat_feats = feature_info.get('categorical_features') or feature_info.get('cat_cols', [])
-    cat_categories = feature_info.get('category_mappings') or feature_info.get('cat_categories', {})
-    encoding_mode = str(feature_info.get("encoding_mode", "onehot")).strip().lower()
+    num_feats = feature_info["num_cols"]
+    cat_feats = feature_info["cat_cols"]
+    cat_categories = feature_info["cat_categories"]
+    encoding_mode = str(feature_info["encoding_mode"]).strip().lower()
 
     num_count = len(num_feats)
     num_indices = list(range(min(num_count, total_dim)))
@@ -510,14 +520,10 @@ def _get_feature_groups(feature_info: Dict, total_dim: int) -> tuple[list[int], 
         return num_indices, cat_groups
 
     for feature in cat_feats:
-        cats = cat_categories.get(feature)
-        if cats is None:
-            continue
-        if isinstance(cats, dict):
-            cats = cats.get('categories', [])
+        cats = cat_categories[feature]
         num_cats = len(cats)
         if num_cats <= 0:
-            continue
+            raise ValueError(f"Feature schema has empty category list for '{feature}'.")
         if current_idx + num_cats > total_dim:
             break
         cat_groups.append(list(range(current_idx, current_idx + num_cats)))
@@ -623,9 +629,7 @@ def _tab_leak_accuracy(
     cat_hits = np.zeros(gt.shape[0], dtype=float)
     current_idx = num_count
     for col in cat_cols:
-        cats = cat_categories.get(col, [])
-        if isinstance(cats, dict):
-            cats = cats.get("categories", [])
+        cats = cat_categories[col]
         n_cats = len(cats)
         if encoding_mode == "ordinal":
             if current_idx < gt.shape[1] and n_cats > 0:
@@ -663,13 +667,13 @@ def write_debug_reconstruction_txt(
     label_tensor: Tensor | None = None,
 ) -> None:
     """Write human-readable per-row reconstruction tables."""
-    num_cols = feature_schema.get("num_cols", [])
-    cat_cols = feature_schema.get("cat_cols", [])
-    cat_categories = feature_schema.get("cat_categories", {}) or {}
+    num_cols = feature_schema["num_cols"]
+    cat_cols = feature_schema["cat_cols"]
+    cat_categories = feature_schema["cat_categories"]
     num_std = None
     num_count = len(num_cols)
     if num_count > 0:
-        stds = feature_schema.get("client_num_std", [])
+        stds = feature_schema["client_num_std"]
         num_std = np.asarray(stds[client_idx], dtype=np.float32)
         num_eps = 0.319 * num_std[:num_count]
     else:
@@ -683,9 +687,7 @@ def write_debug_reconstruction_txt(
     cat_groups: list[dict] = []
     current_idx = num_count
     for col in cat_cols:
-        cats = cat_categories.get(col, [])
-        if isinstance(cats, dict):
-            cats = cats.get("categories", [])
+        cats = cat_categories[col]
         n_cats = len(cats)
         if current_idx + n_cats <= total_dim and n_cats > 0:
             cat_groups.append({"name": col, "indices": list(range(current_idx, current_idx + n_cats)), "cats": cats})

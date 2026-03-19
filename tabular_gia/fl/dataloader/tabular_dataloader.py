@@ -460,6 +460,11 @@ def load_dataset(
         len(X_test_split),
         X_train_split.shape[1],
     )
+    logger.info(
+        "Feature type counts: n_num_features=%d n_cat_features=%d",
+        len(num_cols),
+        len(cat_cols),
+    )
 
     # 4.2 derive target classes from train (classification)
     if task in ("binary", "multiclass"):
@@ -467,7 +472,15 @@ def load_dataset(
         task = "binary" if len(target_classes) == 2 else "multiclass"
     else:
         target_classes = None
-    logger.info("Target classes (train-derived): %s", target_classes if target_classes is not None else "regression")
+    if target_classes is None:
+        logger.info("Target classes (train-derived): regression")
+    else:
+        preview = target_classes[: min(5, len(target_classes))]
+        logger.info(
+            "Target classes (train-derived): count=%d preview=%s",
+            len(target_classes),
+            preview,
+        )
 
     # 4.3 fit/apply encoders (one-hot) using train only
     encoding_mode = encoding_mode.strip().lower()
@@ -485,13 +498,18 @@ def load_dataset(
     else:
         raise ValueError(f"Unknown encoding_mode '{encoding_mode}'. Use 'onehot' or 'ordinal'.")
     feature_columns = X_train.columns.tolist()
+    logger.info(
+        "Encoding applied: mode=%s final_num_features=%d",
+        encoding_mode,
+        len(feature_columns),
+    )
 
     # global train stats for val/test normalization
     global_min = None
     global_max = None
     if num_cols:
         global_mean = X_train[num_cols].mean()
-        global_std = X_train[num_cols].std().replace(0, 1e-6)
+        global_std = X_train[num_cols].std(ddof=0).replace(0, 1e-6)
         global_min = X_train[num_cols].min()
         global_max = X_train[num_cols].max()
         X_val = _normalize_numeric(X_val, num_cols, global_mean, global_std)
@@ -548,12 +566,28 @@ def load_dataset(
         partition_strategy,
         len(client_splits),
     )
+    client_sizes = [len(X_client) for X_client, _ in client_splits]
+    if client_sizes:
+        logger.info(
+            "Client sample sizes: min=%d mean=%.2f max=%d",
+            min(client_sizes),
+            float(np.mean(client_sizes)),
+            max(client_sizes),
+        )
 
     # 5. create dataloaders
     batch_size = dataset_cfg.batch_size
     num_workers = dataset_cfg.num_workers
     pin_memory = dataset_cfg.pin_memory
     persistent_workers = dataset_cfg.persistent_workers
+    logger.info(
+        "DataLoader settings: batch_size=%d drop_last=%s num_workers=%d pin_memory=%s persistent_workers=%s",
+        batch_size,
+        True,
+        num_workers,
+        pin_memory,
+        persistent_workers,
+    )
 
     def _make_generator(loader_seed: int) -> torch.Generator:
         generator = torch.Generator()
@@ -584,7 +618,7 @@ def load_dataset(
     for client_idx, (X_client, y_client) in enumerate(client_splits):
         if num_cols:
             client_mean = X_client[num_cols].mean()
-            client_std = X_client[num_cols].std().replace(0, 1e-6)
+            client_std = X_client[num_cols].std(ddof=0).replace(0, 1e-6)
             X_client = _normalize_numeric(X_client, num_cols, client_mean, client_std)
             client_num_means.append(client_mean.to_numpy(dtype=np.float32, copy=True))
             client_num_stds.append(client_std.to_numpy(dtype=np.float32, copy=True))
@@ -598,8 +632,6 @@ def load_dataset(
             current_idx = len(num_cols)
             for col in cat_cols:
                 cats = encoder_meta["cat_categories"][col]
-                if isinstance(cats, dict):
-                    cats = cats["categories"]
                 n_cats = len(cats)
                 if n_cats <= 0 or current_idx + n_cats > X_client.shape[1]:
                     continue
@@ -647,6 +679,15 @@ def load_dataset(
         )
         client_dataloaders.append(client_loader)
 
+    client_effective_sizes = [int(len(loader) * batch_size) for loader in client_dataloaders]
+    if client_effective_sizes:
+        logger.info(
+            "Client effective samples (drop_last): min=%d mean=%.2f max=%d",
+            min(client_effective_sizes),
+            float(np.mean(client_effective_sizes)),
+            max(client_effective_sizes),
+        )
+
     val_seed = seed + 2_000_003
     val_loader = DataLoader(
         val_ds,
@@ -690,7 +731,7 @@ def load_dataset(
         "train_num_max": global_max.tolist() if num_cols else [],
         "client_cat_probs": client_cat_probs,
     }
-    logger.info("Feature schema: %s", feature_schema)
+    logger.debug("Feature schema: %s", feature_schema)
 
     return client_dataloaders, val_loader, test_loader, feature_schema
 
