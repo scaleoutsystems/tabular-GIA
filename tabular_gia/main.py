@@ -77,6 +77,7 @@ def _run_experiment(
     results_dir: Path,
     fl_only: bool,
     max_parallel_groups: int,
+    resume_experiment_dir: Path | None,
 ) -> None:
     if experiment_name not in EXPERIMENT_RUNNERS:
         names = ", ".join(sorted(EXPERIMENT_RUNNERS.keys()))
@@ -88,6 +89,7 @@ def _run_experiment(
         results_dir=results_dir / "experiments",
         fl_only=fl_only,
         max_parallel_groups=max_parallel_groups,
+        resume_experiment_dir=resume_experiment_dir,
     )
     runner.run()
 
@@ -98,6 +100,7 @@ def main(
     experiment_name: str | None = None,
     fl_only: bool = False,
     max_parallel_groups: int = 1,
+    resume_experiment_dir: Path | None = None,
 ) -> None:
     base_cfg = BaseConfig()
     dataset_cfg = DatasetConfig()
@@ -134,6 +137,7 @@ def main(
         results_dir=results_dir,
         fl_only=fl_only,
         max_parallel_groups=max_parallel_groups,
+        resume_experiment_dir=resume_experiment_dir,
     )
 
 
@@ -144,6 +148,14 @@ if __name__ == "__main__":
     parser.add_argument("--results-dir", default=str(project_dir / "results"))
     parser.add_argument("--experiment", default=None)
     parser.add_argument("--fl-only", action="store_true")
+    parser.add_argument(
+        "--resume-experiment-dir",
+        default=None,
+        help=(
+            "Existing experiment directory name or path to resume. "
+            "Completed seed runs are skipped; incomplete seed runs are rerun from scratch."
+        ),
+    )
     parser.add_argument(
         "--max_parallel_groups",
         "--max_parallell_groups",
@@ -163,4 +175,5 @@ if __name__ == "__main__":
         experiment_name=args.experiment,
         fl_only=args.fl_only,
         max_parallel_groups=args.max_parallel_groups,
+        resume_experiment_dir=Path(args.resume_experiment_dir) if args.resume_experiment_dir is not None else None,
     )

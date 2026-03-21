@@ -139,7 +139,14 @@ def build_sweep_cfg() -> dict[str, Any]:
 
 
 class FedSGDBatchSizesRunner(SweepExperimentRunner):
-    def __init__(self, sweep_cfg, results_dir, fl_only=False, max_parallel_groups: int = 1):
+    def __init__(
+        self,
+        sweep_cfg,
+        results_dir,
+        fl_only=False,
+        max_parallel_groups: int = 1,
+        resume_experiment_dir=None,
+    ):
         # ignore passed sweep_cfg; use hardcoded experiment config
         _ = sweep_cfg
         super().__init__(
@@ -147,4 +154,5 @@ class FedSGDBatchSizesRunner(SweepExperimentRunner):
             results_dir=results_dir,
             fl_only=fl_only,
             max_parallel_groups=max_parallel_groups,
+            resume_experiment_dir=resume_experiment_dir,
         )
