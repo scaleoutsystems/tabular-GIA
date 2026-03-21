@@ -259,6 +259,8 @@ class AbstractGIA(AbstractAttack):
         if recon_tensor.shape != orig_tensor.shape and hasattr(self, "model") and hasattr(self.model, "from_gia_space"):
             with torch.no_grad():
                 recon_tensor = self.model.from_gia_space(recon_tensor)
+        if orig_tensor.device != recon_tensor.device:
+            orig_tensor = orig_tensor.to(recon_tensor.device)
 
         mse = torch.mean((orig_tensor - recon_tensor) ** 2).item()
         mae = torch.mean(torch.abs(orig_tensor - recon_tensor)).item()
