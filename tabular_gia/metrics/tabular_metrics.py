@@ -664,7 +664,8 @@ def write_debug_reconstruction_txt(
     per_row_metrics: Dict,
     feature_schema: Dict,
     client_idx: int,
-    label_tensor: Tensor | None = None,
+    true_label_tensor: Tensor | None = None,
+    recovered_label_tensor: Tensor | None = None,
 ) -> None:
     """Write human-readable per-row reconstruction tables."""
     num_cols = feature_schema["num_cols"]
@@ -724,15 +725,25 @@ def write_debug_reconstruction_txt(
                 recon_values.append(pred_label)
                 acc_values.append(float(true_code == pred_code))
 
-            if label_tensor is not None:
-                true_label = label_tensor[row_idx].item()
-                row_values.append(true_label)
-                recon_values.append(true_label)
-                acc_values.append(1.0)
+            has_target = true_label_tensor is not None or recovered_label_tensor is not None
+            if has_target:
+                original_target = (
+                    true_label_tensor[row_idx].item()
+                    if true_label_tensor is not None
+                    else recovered_label_tensor[row_idx].item()
+                )
+                reconstructed_target = (
+                    recovered_label_tensor[row_idx].item()
+                    if recovered_label_tensor is not None
+                    else true_label_tensor[row_idx].item()
+                )
+                row_values.append(original_target)
+                recon_values.append(reconstructed_target)
+                acc_values.append(float(np.isclose(original_target, reconstructed_target)))
 
             total_acc = float(per_row_acc[row_idx]) if row_idx < len(per_row_acc) else float("nan")
             headers = num_cols + [g["name"] for g in cat_groups]
-            if label_tensor is not None:
+            if has_target:
                 headers.append("target")
             headers.append("total_acc")
 
