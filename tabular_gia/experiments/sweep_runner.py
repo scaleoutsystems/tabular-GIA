@@ -555,10 +555,15 @@ class SweepExperimentRunner:
         self.csv_writer = SweepResultsWriter()
         self.seed_summary_builder = SeedSummaryBuilder()
         self.resume_experiment_dir = resume_experiment_dir
+        self.experiment_identifier: str | None = None
 
     def run(self) -> SweepRunResults:
         if self.resume_experiment_dir is None:
-            experiment_id = f"experiment_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            if self.experiment_identifier:
+                experiment_id = f"experiment_{self.experiment_identifier}_{timestamp}"
+            else:
+                experiment_id = f"experiment_{timestamp}"
             experiment_dir = self.results_dir / experiment_id
             experiment_dir.mkdir(parents=True, exist_ok=True)
         else:

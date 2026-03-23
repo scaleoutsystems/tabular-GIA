@@ -140,7 +140,7 @@ def build_sweep_cfg() -> dict[str, Any]:
         },
         "grid": {
             # Isolate attacker label knowledge while keeping attack budget fixed.
-            "invertingconfig": {"label_known": [True, False]},
+            "invertingconfig": {"label_known": False},
         },
     }
 
@@ -153,7 +153,7 @@ def build_sweep_cfg() -> dict[str, Any]:
     }
 
 
-class FedSGDLabelKnowledgeRunner(SweepExperimentRunner):
+class FedSGDBatchSizesLabelUnkownRunner(SweepExperimentRunner):
     def __init__(
         self,
         sweep_cfg,
