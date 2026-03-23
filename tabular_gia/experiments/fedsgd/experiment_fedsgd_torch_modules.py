@@ -11,7 +11,7 @@ def build_sweep_cfg() -> dict[str, Any]:
             "seed": 42,
         },
         "grid": {
-            "protocol": ["fedsgd", "fedavg"],
+            "protocol": ["fedsgd"],
             "seed": [7, 13, 42],
         },
     }
@@ -49,6 +49,7 @@ def build_sweep_cfg() -> dict[str, Any]:
                     "data/regression/california_housing/california_housing.yaml",
                 ],
             ],
+            "batch_size": [8,32]
         },
     }
 
@@ -92,6 +93,12 @@ def build_sweep_cfg() -> dict[str, Any]:
         },
         "grid": {
             #"preset": ["small", "resnet", "fttransformer"],
+            "preset": None,
+            "d_hidden": [32, 64, 128],
+            "n_hidden_layers": [1, 2, 3],
+            "norm": ["batchnorm", "layernorm"],
+            "dropout": [0.0, 0.1],
+            "activation": ["relu", "gelu"]
         },
     }
 
@@ -152,7 +159,7 @@ def build_sweep_cfg() -> dict[str, Any]:
     }
 
 
-class ExperimentRunner(SweepExperimentRunner):
+class FedSGDTorchModulesRunner(SweepExperimentRunner):
     def __init__(
         self,
         sweep_cfg,

@@ -19,8 +19,8 @@ def build_sweep_cfg() -> dict[str, Any]:
     dataset = {
         "default": {
             "dataset_path_and_meta_path": [
-                "data/binary/adult/adult.csv",
-                "data/binary/adult/adult.yaml",
+                "data/regression/california_housing/california_housing.csv",
+                "data/regression/california_housing/california_housing.yaml",
             ],
             "num_workers": 0,
             "pin_memory": True,
@@ -118,7 +118,9 @@ def build_sweep_cfg() -> dict[str, Any]:
                 "optimizer": "MetaSGD",
                 "lr": 0.01,
             },
-            "grid": {},
+            "grid": {
+
+            },
         },
     }
 
@@ -152,7 +154,7 @@ def build_sweep_cfg() -> dict[str, Any]:
     }
 
 
-class ExperimentRunner(SweepExperimentRunner):
+class FedAvgBatchSizeRunner(SweepExperimentRunner):
     def __init__(
         self,
         sweep_cfg,

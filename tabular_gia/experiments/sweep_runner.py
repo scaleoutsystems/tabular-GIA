@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import csv
 from concurrent.futures import ProcessPoolExecutor
 import itertools
 import json
+import logging
 import os
+import shutil
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
@@ -24,6 +27,8 @@ from helper.summary_aggregation import SeedSummaryBuilder
 from leakpro.utils.seed import seed_everything
 from tabular_gia.helper.results_writer import SweepResultsWriter
 from tabular_gia.runner.run import RunConfig, RunEngine, RunResult, build_runtime
+
+logger = logging.getLogger(__name__)
 
 
 RunEntry = tuple[int, dict[str, dict[str, Any]], RunConfig]
@@ -384,6 +389,35 @@ def _execute_run_group(
         },
     )
 
+    def _read_csv_rows(path: Path) -> list[dict[str, str]]:
+        if not path.exists() or path.stat().st_size == 0:
+            return []
+        with open(path, encoding="utf-8", newline="") as f:
+            return list(csv.DictReader(f))
+
+    def _load_existing_run_result(results_dir: Path) -> RunResult | None:
+        run_summary_rows = _read_csv_rows(results_dir / "run_summary.csv")
+        if not run_summary_rows:
+            return None
+        return RunResult(
+            fl_rows=_read_csv_rows(results_dir / "fl.csv"),
+            attack_rows=_read_csv_rows(results_dir / "attacks.csv"),
+            round_summaries=_read_csv_rows(results_dir / "rounds_summary.csv"),
+            run_summary=run_summary_rows[-1],
+        )
+
+    def _clear_partial_seed_outputs(results_dir: Path) -> None:
+        if not results_dir.exists():
+            return
+        for filename in ("fl.csv", "attacks.csv", "rounds_summary.csv", "run_summary.csv"):
+            path = results_dir / filename
+            if path.exists():
+                path.unlink()
+        for dirname in ("debug", "aggregated"):
+            path = results_dir / dirname
+            if path.exists():
+                shutil.rmtree(path, ignore_errors=True)
+
     run_results_for_run: list[RunResult] = []
     seed_runs: list[SweepSeedRunResult] = []
     sweep_result_rows_per_seed: list[dict] = []
@@ -407,10 +441,22 @@ def _execute_run_group(
             },
         )
 
-        seed_everything(run_seed)
+        existing_run_result = _load_existing_run_result(run_config.results_dir)
+        if existing_run_result is not None:
+            logger.info(
+                "Resume: skipping completed seed run_id=%d seed=%d at %s",
+                int(run_group_id),
+                int(run_seed),
+                run_config.results_dir,
+            )
+            run_result = existing_run_result
+        else:
+            _clear_partial_seed_outputs(run_config.results_dir)
+            seed_everything(run_seed)
 
-        runtime = build_runtime(run_config)
-        run_result = RunEngine(run_config, runtime).run()
+            runtime = build_runtime(run_config)
+            run_result = RunEngine(run_config, runtime).run()
+
         run_results_for_run.append(run_result)
         seed_runs.append(
             SweepSeedRunResult(
@@ -498,6 +544,7 @@ class SweepExperimentRunner:
         results_dir: Path,
         fl_only: bool = False,
         max_parallel_groups: int = 1,
+        resume_experiment_dir: Path | None = None,
     ) -> None:
         self.sweep_cfg = sweep_cfg
         self.results_dir = results_dir
@@ -507,11 +554,20 @@ class SweepExperimentRunner:
         self.max_parallel_groups = int(max_parallel_groups)
         self.csv_writer = SweepResultsWriter()
         self.seed_summary_builder = SeedSummaryBuilder()
+        self.resume_experiment_dir = resume_experiment_dir
 
     def run(self) -> SweepRunResults:
-        experiment_id = f"experiment_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
-        experiment_dir = self.results_dir / experiment_id
-        experiment_dir.mkdir(parents=True, exist_ok=True)
+        if self.resume_experiment_dir is None:
+            experiment_id = f"experiment_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+            experiment_dir = self.results_dir / experiment_id
+            experiment_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            experiment_dir = self.resume_experiment_dir
+            if not experiment_dir.is_absolute():
+                experiment_dir = self.results_dir / experiment_dir
+            if not experiment_dir.exists():
+                raise ValueError(f"Resume experiment directory does not exist: {experiment_dir}")
+            logger.info("Resuming experiment in existing directory: %s", experiment_dir)
 
         run_entries = build_run_configs(
             sweep_cfg=self.sweep_cfg,
