@@ -509,9 +509,23 @@ def load_dataset(
         df = pd.read_csv(dataset_path)
     logger.info("Loaded data: rows=%d cols=%d no_header=%s", df.shape[0], df.shape[1], no_header)
 
-    exclude_cols = meta["exclude_cols"] if use_mimic_dataset_logic and "exclude_cols" in meta else []
-    if exclude_cols is None:
-        exclude_cols = []
+    if use_mimic_dataset_logic:
+        exclude_cols = meta.get("exclude_cols", [])
+        if exclude_cols is None:
+            exclude_cols = []
+    else:
+        exclude_cols = meta["exclude_cols"] if "exclude_cols" in meta else []
+        if exclude_cols is None:
+            exclude_cols = []
+        if len(exclude_cols) > 0:
+            drop_cols = [str(col) for col in exclude_cols]
+            missing_exclude_cols = [col for col in drop_cols if col not in df.columns]
+            if len(missing_exclude_cols) > 0:
+                raise ValueError(
+                    f"exclude_cols contains columns not found in dataset: {missing_exclude_cols}"
+                )
+            df = df.drop(columns=drop_cols)
+            logger.info("Dropped excluded columns: count=%d cols=%s", len(drop_cols), drop_cols)
 
     # 3 perform target split
     target = meta["target"]
@@ -547,9 +561,14 @@ def load_dataset(
     test_frac = dataset_cfg.test_frac
     stratify_labels = y if task in ("binary", "multiclass") else None
 
-    val_path = _resolve_split_path(dataset_path, meta.get("has_val_split"))
-    test_path = _resolve_split_path(dataset_path, meta.get("has_test_split"))
-    if val_path is not None and test_path is not None:
+    if use_mimic_dataset_logic:
+        val_path = _resolve_split_path(dataset_path, meta.get("has_val_split"))
+        test_path = _resolve_split_path(dataset_path, meta.get("has_test_split"))
+    else:
+        val_path = None
+        test_path = meta["has_test_split"] if "has_test_split" in meta else None
+
+    if use_mimic_dataset_logic and val_path is not None and test_path is not None:
         logger.info("External validation/test splits provided: val=%s test=%s", val_path, test_path)
         X_train_split, y_train = X_full, y
 
@@ -567,7 +586,7 @@ def load_dataset(
         X_test_split, y_test_split = _split_target(test_df, target, no_header)
         y_test, keep_mask = _clean_target_for_task(y_test_split, missing_values, task)
         X_test_split = X_test_split.loc[keep_mask].reset_index(drop=True)
-    elif test_path is not None:
+    elif test_path:
         logger.info("External test split provided: %s", test_path)
         val_ratio = val_frac / max(1e-8, (train_frac + val_frac))
         X_train_split, X_val_split, y_train, y_val = train_test_split(
@@ -575,8 +594,10 @@ def load_dataset(
             y,
             test_size=val_ratio,
             random_state=seed,
-            stratify=_safe_stratify_labels(stratify_labels),
+            stratify=_safe_stratify_labels(stratify_labels) if use_mimic_dataset_logic else stratify_labels,
         )
+        if not use_mimic_dataset_logic:
+            test_path = Path(test_path)
         if no_header:
             test_df = pd.read_csv(test_path, header=None)
         else:
@@ -603,7 +624,7 @@ def load_dataset(
             y,
             test_size=(1 - train_frac),
             random_state=seed,
-            stratify=_safe_stratify_labels(stratify_labels),
+            stratify=_safe_stratify_labels(stratify_labels) if use_mimic_dataset_logic else stratify_labels,
         )
         remaining = val_frac + test_frac
         test_size = (test_frac / remaining) if remaining > 0 else 0.5
@@ -612,17 +633,20 @@ def load_dataset(
             y_temp,
             test_size=test_size,
             random_state=seed,
-            stratify=_safe_stratify_labels(y_temp) if task in ("binary", "multiclass") else None,
+            stratify=(
+                _safe_stratify_labels(y_temp) if use_mimic_dataset_logic else y_temp
+            ) if task in ("binary", "multiclass") else None,
         )
 
-    feature_drop_cols = list(dict.fromkeys(exclude_cols))
-    if group_split_column is not None:
-        feature_drop_cols = list(dict.fromkeys(feature_drop_cols + [group_split_column]))
-    if feature_drop_cols:
-        X_train_split = _drop_feature_columns(X_train_split, feature_drop_cols)
-        X_val_split = _drop_feature_columns(X_val_split, feature_drop_cols)
-        X_test_split = _drop_feature_columns(X_test_split, feature_drop_cols)
-        logger.info("Dropped non-feature columns after splitting: %s", feature_drop_cols)
+    if use_mimic_dataset_logic:
+        feature_drop_cols = list(dict.fromkeys(exclude_cols))
+        if group_split_column is not None:
+            feature_drop_cols = list(dict.fromkeys(feature_drop_cols + [group_split_column]))
+        if feature_drop_cols:
+            X_train_split = _drop_feature_columns(X_train_split, feature_drop_cols)
+            X_val_split = _drop_feature_columns(X_val_split, feature_drop_cols)
+            X_test_split = _drop_feature_columns(X_test_split, feature_drop_cols)
+            logger.info("Dropped non-feature columns after splitting: %s", feature_drop_cols)
 
     # 4.1 preprocess splits without one-hot (infer types on train only)
     meta_num_cols, meta_cat_cols = (None, None)

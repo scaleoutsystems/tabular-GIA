@@ -62,30 +62,27 @@ RUN_SUMMARY_STATS_CSV_FIELDS = (
 )
 
 
-def _as_float_or_nan(value: object) -> float:
-    if value is None:
-        return float("nan")
-    raw = str(value).strip()
-    if raw == "":
-        return float("nan")
-    try:
-        parsed = float(raw)
-    except (TypeError, ValueError):
-        return float("nan")
-    if not math.isfinite(parsed):
-        return float("nan")
-    return parsed
-
-
 def _weighted_metric_means(
     records: List[Dict],
     weights: np.ndarray,
     excluded_keys: set[str],
 ) -> Dict[str, float]:
+    def _to_float_or_nan(value: object) -> float:
+        if value is None:
+            return float("nan")
+        raw = str(value).strip()
+        if raw == "":
+            return float("nan")
+        try:
+            parsed = float(raw)
+        except (TypeError, ValueError):
+            return float("nan")
+        return parsed if math.isfinite(parsed) else float("nan")
+
     metric_keys = [k for k in records[0].keys() if k not in excluded_keys]
     means: Dict[str, float] = {}
     for key in metric_keys:
-        values = np.array([_as_float_or_nan(record.get(key)) for record in records], dtype=float)
+        values = np.array([_to_float_or_nan(record.get(key)) for record in records], dtype=float)
         valid = ~np.isnan(values)
         if not valid.any():
             means[key] = float("nan")
@@ -157,7 +154,10 @@ class RunSummaryBuilder:
         for round_idx in sorted(round_attack_rows):
             metrics_list = round_attack_rows[round_idx]
             metric_rows = [
-                {"row_count": row["row_count"], **{k: row[k] for k in ROUNDS_SUMMARY_CSV_FIELDS if k in row}}
+                {
+                    "row_count": row["row_count"],
+                    **{k: row.get(k, float("nan")) for k in ROUNDS_SUMMARY_CSV_FIELDS},
+                }
                 for row in metrics_list
             ]
             round_summary = summarize_round(metric_rows, round_idx)
@@ -191,8 +191,16 @@ class SeedRunResult(Protocol):
 
 class SeedSummaryBuilder:
     def _to_float(self, value: object) -> float | None:
-        parsed = _as_float_or_nan(value)
-        if math.isnan(parsed):
+        if value is None:
+            return None
+        raw = str(value).strip()
+        if raw == "":
+            return None
+        try:
+            parsed = float(raw)
+        except ValueError:
+            return None
+        if not math.isfinite(parsed):
             return None
         return parsed
 
