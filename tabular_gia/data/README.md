@@ -21,6 +21,11 @@ size_categories:
 # UCI Tabular Benchmark Sample
 This repository contains a small collection of tabular datasets mirrored from the UCI Machine Learning Repository and prepared for convenient experimentation.
 
+## MIMIC-IV Notes
+For the MIMIC-derived datasets used in this project (tiered binary/multiclass/regression admissions cohorts), see:
+
+- [MIMIC_DATASET_NOTES.md](./MIMIC_DATASET_NOTES.md)
+
 ## Contents
 The datasets are organized by common ML task type:
 

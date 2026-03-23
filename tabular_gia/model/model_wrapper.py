@@ -9,11 +9,16 @@ from configs.model.model import ModelConfig
 
 
 class ModelWrapper(nn.Module):
-    def __init__(self, *, task: str) -> None:
+    def __init__(self, *, task: str, binary_pos_weight: float | None = None) -> None:
         super().__init__()
         self.task = str(task)
         if self.task == "binary":
-            self.criterion = torch.nn.BCEWithLogitsLoss()
+            if binary_pos_weight is not None:
+                self.criterion = torch.nn.BCEWithLogitsLoss(
+                    pos_weight=torch.tensor([float(binary_pos_weight)], dtype=torch.float32)
+                )
+            else:
+                self.criterion = torch.nn.BCEWithLogitsLoss()
         elif self.task == "multiclass":
             self.criterion = torch.nn.CrossEntropyLoss()
         else:
@@ -54,6 +59,7 @@ class ModelWrapper(nn.Module):
         cfg = cls.resolve_model_cfg(model_cfg)
 
         task = feature_schema["task"]
+        binary_pos_weight = feature_schema.get("binary_pos_weight")
         if task == "multiclass":
             d_out = int(feature_schema["num_classes"])
         else:
@@ -68,6 +74,7 @@ class ModelWrapper(nn.Module):
                 )
             return FTTransformerWrapper(
                 task=task,
+                binary_pos_weight=binary_pos_weight,
                 d_out=d_out,
                 n_num_features=int(feature_schema["n_num_features"]),
                 cat_cardinalities=list(feature_schema["cat_cardinalities"]),
@@ -89,6 +96,7 @@ class ModelWrapper(nn.Module):
             resnet_kwargs = {**defaults, **cfg}
             return ResNetWrapper(
                 task=task,
+                binary_pos_weight=binary_pos_weight,
                 d_out=d_out,
                 d_in=int(feature_schema["num_features"]),
                 **resnet_kwargs,
@@ -102,6 +110,7 @@ class ModelWrapper(nn.Module):
             d_in=int(feature_schema["num_features"]),
             d_out=d_out,
             task=task,
+            binary_pos_weight=binary_pos_weight,
             **cfg,
         )
 
@@ -111,11 +120,12 @@ class FTTransformerWrapper(ModelWrapper):
         self,
         *,
         task: str,
+        binary_pos_weight: float | None,
         d_out: int,
         n_num_features: int,
         cat_cardinalities: list[int],
     ) -> None:
-        super().__init__(task=task)
+        super().__init__(task=task, binary_pos_weight=binary_pos_weight)
         from rtdl_revisiting_models import FTTransformer
 
         self.n_num_features = int(n_num_features)
@@ -239,6 +249,7 @@ class ResNetWrapper(ModelWrapper):
         self,
         *,
         task: str,
+        binary_pos_weight: float | None,
         d_out: int,
         d_in: int,
         n_blocks: int,
@@ -248,7 +259,7 @@ class ResNetWrapper(ModelWrapper):
         dropout1: float,
         dropout2: float,
     ) -> None:
-        super().__init__(task=task)
+        super().__init__(task=task, binary_pos_weight=binary_pos_weight)
         from rtdl_revisiting_models import ResNet
 
         self.backbone = ResNet(

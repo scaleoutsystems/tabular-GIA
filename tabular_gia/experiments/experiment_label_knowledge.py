@@ -1,4 +1,3 @@
-# tabular_gia/experiments/experiment_template.py
 from typing import Any
 
 from experiments.sweep_runner import SweepExperimentRunner
@@ -11,7 +10,7 @@ def build_sweep_cfg() -> dict[str, Any]:
             "seed": 42,
         },
         "grid": {
-            "protocol": ["fedsgd", "fedavg"],
+            "protocol": "fedsgd",
             "seed": [7, 13, 42],
         },
     }
@@ -34,7 +33,10 @@ def build_sweep_cfg() -> dict[str, Any]:
             "min_client_samples": 1,
             "dirichlet_max_attempts": 50,
         },
-        "grid": {},
+        "grid": {
+            # Keep the two batch sizes that already separated leakage regimes clearly.
+            "batch_size": [8, 32],
+        },
     }
 
     model = {
@@ -76,7 +78,7 @@ def build_sweep_cfg() -> dict[str, Any]:
             },
         },
         "grid": {
-            #"preset": ["small", "resnet", "fttransformer"],
+            "preset": ["small", "resnet", "fttransformer"],
         },
     }
 
@@ -123,8 +125,8 @@ def build_sweep_cfg() -> dict[str, Any]:
             },
         },
         "grid": {
-            # Nested key sweep example:
-            # "invertingconfig": {"at_iterations": [100, 500, 1000]},
+            # Isolate attacker label knowledge while keeping attack budget fixed.
+            "invertingconfig": {"label_known": [True, False]},
         },
     }
 
@@ -137,7 +139,7 @@ def build_sweep_cfg() -> dict[str, Any]:
     }
 
 
-class ExperimentRunner(SweepExperimentRunner):
+class LabelKnowledgeRunner(SweepExperimentRunner):
     def __init__(
         self,
         sweep_cfg,
@@ -146,7 +148,6 @@ class ExperimentRunner(SweepExperimentRunner):
         max_parallel_groups: int = 1,
         resume_experiment_dir=None,
     ):
-        # ignore passed sweep_cfg; use hardcoded experiment config
         _ = sweep_cfg
         super().__init__(
             sweep_cfg=build_sweep_cfg(),

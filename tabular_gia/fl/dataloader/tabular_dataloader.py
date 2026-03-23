@@ -76,6 +76,38 @@ def preprocess(
     return X, num_cols, cat_cols
 
 
+def _resolve_feature_types_from_meta(
+    X: pd.DataFrame,
+    meta: dict,
+) -> tuple[list[str] | None, list[str] | None]:
+    explicit_num = meta.get("numerical_columns")
+    explicit_cat = meta.get("categorical_columns")
+    if explicit_num is None and explicit_cat is None:
+        return None, None
+
+    feature_cols = X.columns.tolist()
+    explicit_num_cols = [str(col) for col in (explicit_num or [])]
+    explicit_cat_cols = [str(col) for col in (explicit_cat or [])]
+    missing_declared = [col for col in (explicit_num_cols + explicit_cat_cols) if col not in feature_cols]
+    if missing_declared:
+        logger.warning("Ignoring metadata columns not present in dataset: %s", missing_declared)
+
+    explicit_num_cols = [col for col in explicit_num_cols if col in feature_cols]
+    explicit_cat_cols = [col for col in explicit_cat_cols if col in feature_cols]
+    overlap = sorted(set(explicit_num_cols).intersection(explicit_cat_cols))
+    if overlap:
+        raise ValueError(f"Columns declared as both numerical and categorical: {overlap}")
+
+    assigned = set(explicit_num_cols).union(explicit_cat_cols)
+    remaining_cols = [col for col in feature_cols if col not in assigned]
+    if remaining_cols:
+        inferred_num, inferred_cat = _infer_column_types(X[remaining_cols])
+        explicit_num_cols.extend(inferred_num)
+        explicit_cat_cols.extend(inferred_cat)
+
+    return explicit_num_cols, explicit_cat_cols
+
+
 def _fit_encoders(
     X_train: pd.DataFrame,
     num_cols: list[str],
@@ -239,6 +271,120 @@ def _encode_target(y: pd.Series, task: str, target_classes: list | None) -> torc
     return torch.tensor(y_num.to_numpy(), dtype=torch.float32).view(-1, 1)
 
 
+def _resolve_split_path(dataset_path: Path, split_path: str | None) -> Path | None:
+    if split_path is None:
+        return None
+    path = Path(split_path)
+    if path.is_absolute():
+        return path
+    return dataset_path.parent / path
+
+
+def _safe_stratify_labels(labels: pd.Series | None) -> pd.Series | None:
+    if labels is None:
+        return None
+    labels = labels.copy()
+    value_counts = labels.value_counts(dropna=False)
+    if len(value_counts) < 2 or int(value_counts.min()) < 2:
+        return None
+    return labels
+
+
+def _group_stratify_labels(
+    groups: pd.Series,
+    y: pd.Series,
+    task: str,
+) -> pd.Series | None:
+    if task not in ("binary", "multiclass"):
+        return None
+
+    tmp = pd.DataFrame({"group": groups.reset_index(drop=True), "target": y.reset_index(drop=True)})
+    if tmp["group"].isna().any():
+        raise ValueError("group_split_column contains missing values; grouped splitting requires complete group ids.")
+
+    if task == "binary":
+        y_num = pd.to_numeric(tmp["target"], errors="coerce")
+        unique_numeric = set(pd.unique(y_num.dropna()))
+        if y_num.notna().all() and unique_numeric.issubset({0, 1}):
+            group_labels = tmp.assign(target=y_num.astype(int)).groupby("group", sort=False)["target"].max()
+            return _safe_stratify_labels(group_labels)
+
+    group_labels = tmp.groupby("group", sort=False)["target"].agg(
+        lambda s: s.mode().iat[0] if not s.mode().empty else s.iloc[0]
+    )
+    return _safe_stratify_labels(group_labels)
+
+
+def _split_train_val_test_grouped(
+    X: pd.DataFrame,
+    y: pd.Series,
+    groups: pd.Series,
+    *,
+    task: str,
+    seed: int,
+    train_frac: float,
+    val_frac: float,
+    test_frac: float,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.Series, pd.Series, pd.Series]:
+    if groups.isna().any():
+        raise ValueError("group_split_column contains missing values; grouped splitting requires complete group ids.")
+
+    unique_groups = pd.Index(groups.drop_duplicates().tolist())
+    if len(unique_groups) < 3:
+        raise ValueError(f"Need at least 3 unique groups for grouped split, got {len(unique_groups)}.")
+
+    group_labels = _group_stratify_labels(groups, y, task)
+    unique_groups_series = pd.Series(unique_groups.tolist())
+    if group_labels is not None:
+        group_labels = group_labels.reindex(unique_groups).reset_index(drop=True)
+
+    train_val_groups, test_groups = train_test_split(
+        unique_groups_series,
+        test_size=test_frac,
+        random_state=seed,
+        stratify=group_labels,
+    )
+
+    train_val_groups = train_val_groups.reset_index(drop=True)
+    test_groups = pd.Index(test_groups.tolist())
+    train_val_labels = None
+    if group_labels is not None:
+        train_val_label_map = pd.Series(group_labels.to_numpy(), index=unique_groups)
+        train_val_labels = _safe_stratify_labels(train_val_label_map.loc[train_val_groups].reset_index(drop=True))
+
+    val_relative = val_frac / max(1e-8, (train_frac + val_frac))
+    train_groups, val_groups = train_test_split(
+        train_val_groups,
+        test_size=val_relative,
+        random_state=seed,
+        stratify=train_val_labels,
+    )
+
+    train_groups = set(train_groups.tolist())
+    val_groups = set(val_groups.tolist())
+    test_groups = set(test_groups.tolist())
+
+    train_mask = groups.isin(train_groups)
+    val_mask = groups.isin(val_groups)
+    test_mask = groups.isin(test_groups)
+
+    return (
+        X.loc[train_mask].reset_index(drop=True),
+        X.loc[val_mask].reset_index(drop=True),
+        X.loc[test_mask].reset_index(drop=True),
+        y.loc[train_mask].reset_index(drop=True),
+        y.loc[val_mask].reset_index(drop=True),
+        y.loc[test_mask].reset_index(drop=True),
+    )
+
+
+def _drop_feature_columns(X: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    drop_cols = [col for col in columns if col in X.columns]
+    if not drop_cols:
+        return X
+    return X.drop(columns=drop_cols)
+
+
 def _split_clients_iid(
     X_train: pd.DataFrame,
     y_train: pd.Series,
@@ -351,9 +497,11 @@ def load_dataset(
     logger.info("Loading dataset config: meta=%s data=%s", dataset_meta_path, dataset_path)
     with open(dataset_meta_path, "r") as f:
         meta = yaml.safe_load(f) or {}
+    dataset_family = str(meta.get("dataset_family", "standard")).strip().lower()
+    use_mimic_dataset_logic = dataset_family == "mimic"
 
     # 1.1 handle no_header if present
-    no_header = bool(meta["no_header"])
+    no_header = bool(meta.get("no_header", False))
     if no_header:
         # 2. load csv dataset to pandas dataframe
         df = pd.read_csv(dataset_path, header=None)
@@ -361,18 +509,23 @@ def load_dataset(
         df = pd.read_csv(dataset_path)
     logger.info("Loaded data: rows=%d cols=%d no_header=%s", df.shape[0], df.shape[1], no_header)
 
-    exclude_cols = meta["exclude_cols"] if "exclude_cols" in meta else []
-    if exclude_cols is None:
-        exclude_cols = []
-    if len(exclude_cols) > 0:
-        drop_cols = [str(col) for col in exclude_cols]
-        missing_exclude_cols = [col for col in drop_cols if col not in df.columns]
-        if len(missing_exclude_cols) > 0:
-            raise ValueError(
-                f"exclude_cols contains columns not found in dataset: {missing_exclude_cols}"
-            )
-        df = df.drop(columns=drop_cols)
-        logger.info("Dropped excluded columns: count=%d cols=%s", len(drop_cols), drop_cols)
+    if use_mimic_dataset_logic:
+        exclude_cols = meta.get("exclude_cols", [])
+        if exclude_cols is None:
+            exclude_cols = []
+    else:
+        exclude_cols = meta["exclude_cols"] if "exclude_cols" in meta else []
+        if exclude_cols is None:
+            exclude_cols = []
+        if len(exclude_cols) > 0:
+            drop_cols = [str(col) for col in exclude_cols]
+            missing_exclude_cols = [col for col in drop_cols if col not in df.columns]
+            if len(missing_exclude_cols) > 0:
+                raise ValueError(
+                    f"exclude_cols contains columns not found in dataset: {missing_exclude_cols}"
+                )
+            df = df.drop(columns=drop_cols)
+            logger.info("Dropped excluded columns: count=%d cols=%s", len(drop_cols), drop_cols)
 
     # 3 perform target split
     target = meta["target"]
@@ -387,6 +540,15 @@ def load_dataset(
     y, keep_mask = _clean_target_for_task(y_full, missing_values, task)
     # drop rows with missing targets
     X_full = X_full.loc[keep_mask].reset_index(drop=True)
+    group_split_column = meta.get("group_split_column") if use_mimic_dataset_logic else None
+    group_values = None
+    if group_split_column is not None:
+        group_split_column = str(group_split_column)
+        if group_split_column not in X_full.columns:
+            raise ValueError(
+                f"group_split_column '{group_split_column}' not found in dataset features after target split."
+            )
+        group_values = X_full[group_split_column].reset_index(drop=True)
     if keep_mask.size:
         dropped = int((~keep_mask).sum())
     else:
@@ -399,8 +561,32 @@ def load_dataset(
     test_frac = dataset_cfg.test_frac
     stratify_labels = y if task in ("binary", "multiclass") else None
 
-    test_path = meta["has_test_split"]
-    if test_path:
+    if use_mimic_dataset_logic:
+        val_path = _resolve_split_path(dataset_path, meta.get("has_val_split"))
+        test_path = _resolve_split_path(dataset_path, meta.get("has_test_split"))
+    else:
+        val_path = None
+        test_path = meta["has_test_split"] if "has_test_split" in meta else None
+
+    if use_mimic_dataset_logic and val_path is not None and test_path is not None:
+        logger.info("External validation/test splits provided: val=%s test=%s", val_path, test_path)
+        X_train_split, y_train = X_full, y
+
+        if no_header:
+            val_df = pd.read_csv(val_path, header=None)
+            test_df = pd.read_csv(test_path, header=None)
+        else:
+            val_df = pd.read_csv(val_path)
+            test_df = pd.read_csv(test_path)
+
+        X_val_split, y_val_split = _split_target(val_df, target, no_header)
+        y_val, keep_mask = _clean_target_for_task(y_val_split, missing_values, task)
+        X_val_split = X_val_split.loc[keep_mask].reset_index(drop=True)
+
+        X_test_split, y_test_split = _split_target(test_df, target, no_header)
+        y_test, keep_mask = _clean_target_for_task(y_test_split, missing_values, task)
+        X_test_split = X_test_split.loc[keep_mask].reset_index(drop=True)
+    elif test_path:
         logger.info("External test split provided: %s", test_path)
         val_ratio = val_frac / max(1e-8, (train_frac + val_frac))
         X_train_split, X_val_split, y_train, y_val = train_test_split(
@@ -408,11 +594,10 @@ def load_dataset(
             y,
             test_size=val_ratio,
             random_state=seed,
-            stratify=stratify_labels,
+            stratify=_safe_stratify_labels(stratify_labels) if use_mimic_dataset_logic else stratify_labels,
         )
-        test_path = Path(test_path)
-        #if not test_path.is_absolute():
-        #    test_path = Path(dataset_path).parent / test_path
+        if not use_mimic_dataset_logic:
+            test_path = Path(test_path)
         if no_header:
             test_df = pd.read_csv(test_path, header=None)
         else:
@@ -420,6 +605,18 @@ def load_dataset(
         X_test_split, y_test_split = _split_target(test_df, target, no_header)
         y_test, keep_mask = _clean_target_for_task(y_test_split, missing_values, task)
         X_test_split = X_test_split.loc[keep_mask].reset_index(drop=True)
+    elif group_values is not None:
+        logger.info("No external splits; using grouped internal train/val/test split by '%s'.", group_split_column)
+        X_train_split, X_val_split, X_test_split, y_train, y_val, y_test = _split_train_val_test_grouped(
+            X_full,
+            y,
+            group_values,
+            task=task,
+            seed=seed,
+            train_frac=train_frac,
+            val_frac=val_frac,
+            test_frac=test_frac,
+        )
     else:
         logger.info("No external test split; using internal train/val/test fractions.")
         X_train_split, X_holdout, y_train, y_temp = train_test_split(
@@ -427,7 +624,7 @@ def load_dataset(
             y,
             test_size=(1 - train_frac),
             random_state=seed,
-            stratify=stratify_labels,
+            stratify=_safe_stratify_labels(stratify_labels) if use_mimic_dataset_logic else stratify_labels,
         )
         remaining = val_frac + test_frac
         test_size = (test_frac / remaining) if remaining > 0 else 0.5
@@ -436,11 +633,31 @@ def load_dataset(
             y_temp,
             test_size=test_size,
             random_state=seed,
-            stratify=y_temp if task in ("binary", "multiclass") else None,
+            stratify=(
+                _safe_stratify_labels(y_temp) if use_mimic_dataset_logic else y_temp
+            ) if task in ("binary", "multiclass") else None,
         )
 
+    if use_mimic_dataset_logic:
+        feature_drop_cols = list(dict.fromkeys(exclude_cols))
+        if group_split_column is not None:
+            feature_drop_cols = list(dict.fromkeys(feature_drop_cols + [group_split_column]))
+        if feature_drop_cols:
+            X_train_split = _drop_feature_columns(X_train_split, feature_drop_cols)
+            X_val_split = _drop_feature_columns(X_val_split, feature_drop_cols)
+            X_test_split = _drop_feature_columns(X_test_split, feature_drop_cols)
+            logger.info("Dropped non-feature columns after splitting: %s", feature_drop_cols)
+
     # 4.1 preprocess splits without one-hot (infer types on train only)
-    X_train_split, num_cols, cat_cols = preprocess(X_train_split, missing_values)
+    meta_num_cols, meta_cat_cols = (None, None)
+    if use_mimic_dataset_logic:
+        meta_num_cols, meta_cat_cols = _resolve_feature_types_from_meta(X_train_split, meta)
+    X_train_split, num_cols, cat_cols = preprocess(
+        X_train_split,
+        missing_values,
+        num_cols=meta_num_cols,
+        cat_cols=meta_cat_cols,
+    )
     X_val_split, _, _ = preprocess(
         X_val_split,
         missing_values,
@@ -464,6 +681,12 @@ def load_dataset(
         "Feature type counts: n_num_features=%d n_cat_features=%d",
         len(num_cols),
         len(cat_cols),
+    )
+    logger.info(
+        "Dataset family path: family=%s feature_types=%s grouped_split=%s",
+        dataset_family,
+        "metadata" if use_mimic_dataset_logic and (meta_num_cols is not None or meta_cat_cols is not None) else "inferred",
+        bool(group_split_column),
     )
 
     # 4.2 derive target classes from train (classification)
@@ -725,6 +948,8 @@ def load_dataset(
         "n_cat_features": len(cat_cols),
         "encoding_mode": encoding_mode,
         "num_classes": len(target_classes) if task in ("binary", "multiclass") else 1,
+        "dataset_family": dataset_family,
+        "binary_pos_weight": meta.get("binary_pos_weight"),
         "client_num_mean": [m.tolist() for m in client_num_means],
         "client_num_std": [s.tolist() for s in client_num_stds],
         "train_num_min": global_min.tolist() if num_cols else [],

@@ -1,4 +1,3 @@
-# tabular_gia/experiments/experiment_template.py
 from typing import Any
 
 from experiments.sweep_runner import SweepExperimentRunner
@@ -11,7 +10,7 @@ def build_sweep_cfg() -> dict[str, Any]:
             "seed": 42,
         },
         "grid": {
-            "protocol": ["fedsgd", "fedavg"],
+            "protocol": "fedsgd",
             "seed": [7, 13, 42],
         },
     }
@@ -34,7 +33,9 @@ def build_sweep_cfg() -> dict[str, Any]:
             "min_client_samples": 1,
             "dirichlet_max_attempts": 50,
         },
-        "grid": {},
+        "grid": {
+            "batch_size": [8, 32],
+        },
     }
 
     model = {
@@ -76,7 +77,7 @@ def build_sweep_cfg() -> dict[str, Any]:
             },
         },
         "grid": {
-            #"preset": ["small", "resnet", "fttransformer"],
+            "preset": ["small", "resnet", "fttransformer"],
         },
     }
 
@@ -123,8 +124,8 @@ def build_sweep_cfg() -> dict[str, Any]:
             },
         },
         "grid": {
-            # Nested key sweep example:
-            # "invertingconfig": {"at_iterations": [100, 500, 1000]},
+            # Sweep attack effort over logarithmic-style steps.
+            "invertingconfig": {"at_iterations": [5000, 10000, 20000]}
         },
     }
 
@@ -137,7 +138,7 @@ def build_sweep_cfg() -> dict[str, Any]:
     }
 
 
-class ExperimentRunner(SweepExperimentRunner):
+class AttackIterationsRunner(SweepExperimentRunner):
     def __init__(
         self,
         sweep_cfg,
