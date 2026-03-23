@@ -36,18 +36,18 @@ def build_sweep_cfg() -> dict[str, Any]:
         },
         "grid": {
             "dataset_path_and_meta_path": [
-                [
-                    "data/binary/adult/adult.csv",
-                    "data/binary/adult/adult.yaml",
-                ],
+                #[
+                #    "data/binary/adult/adult.csv",
+                #    "data/binary/adult/adult.yaml",
+                #],
                 [
                     "data/multiclass/pandemic_movement_office/pandemic_movement_office.csv",
                     "data/multiclass/pandemic_movement_office/pandemic_movement_office.yaml",
                 ],
-                [
-                    "data/regression/california_housing/california_housing.csv",
-                    "data/regression/california_housing/california_housing.yaml",
-                ],
+                #[
+                #    "data/regression/california_housing/california_housing.csv",
+                #    "data/regression/california_housing/california_housing.yaml",
+                #],
             ],
             "batch_size": [8,32]
         },
