@@ -49,7 +49,7 @@ def build_sweep_cfg() -> dict[str, Any]:
                     "data/regression/california_housing/california_housing.yaml",
                 ],
             ],
-            "batch_size": [8, 32],
+            "batch_size": [1,2,4,8,16,32,64,128,256],
         },
     }
 
