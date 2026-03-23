@@ -1,3 +1,4 @@
+# tabular_gia/experiments/experiment_template.py
 from typing import Any
 
 from experiments.sweep_runner import SweepExperimentRunner
@@ -10,7 +11,7 @@ def build_sweep_cfg() -> dict[str, Any]:
             "seed": 42,
         },
         "grid": {
-            "protocol": "fedsgd",
+            "protocol": ["fedsgd", "fedavg"],
             "seed": [7, 13, 42],
         },
     }
@@ -18,8 +19,8 @@ def build_sweep_cfg() -> dict[str, Any]:
     dataset = {
         "default": {
             "dataset_path_and_meta_path": [
-                "data/binary/adult/adult.csv",
-                "data/binary/adult/adult.yaml",
+                "data/regression/california_housing/california_housing.csv",
+                "data/regression/california_housing/california_housing.yaml",
             ],
             "num_workers": 0,
             "pin_memory": True,
@@ -34,7 +35,20 @@ def build_sweep_cfg() -> dict[str, Any]:
             "dirichlet_max_attempts": 50,
         },
         "grid": {
-            "batch_size": [8, 32],
+            "dataset_path_and_meta_path": [
+                [
+                    "data/binary/adult/adult.csv",
+                    "data/binary/adult/adult.yaml",
+                ],
+                [
+                    "data/multiclass/pandemic_movement_office/pandemic_movement_office.csv",
+                    "data/multiclass/pandemic_movement_office/pandemic_movement_office.yaml",
+                ],
+                [
+                    "data/regression/california_housing/california_housing.csv",
+                    "data/regression/california_housing/california_housing.yaml",
+                ],
+            ],
         },
     }
 
@@ -77,7 +91,7 @@ def build_sweep_cfg() -> dict[str, Any]:
             },
         },
         "grid": {
-            "preset": ["small", "resnet", "fttransformer"],
+            #"preset": ["small", "resnet", "fttransformer"],
         },
     }
 
@@ -104,7 +118,9 @@ def build_sweep_cfg() -> dict[str, Any]:
                 "optimizer": "MetaSGD",
                 "lr": 0.01,
             },
-            "grid": {},
+            "grid": {
+
+            },
         },
     }
 
@@ -124,8 +140,8 @@ def build_sweep_cfg() -> dict[str, Any]:
             },
         },
         "grid": {
-            # Sweep attack effort over logarithmic-style steps.
-            "invertingconfig": {"at_iterations": [5000, 10000, 20000]}
+            # Nested key sweep example:
+            # "invertingconfig": {"at_iterations": [100, 500, 1000]},
         },
     }
 
@@ -138,7 +154,7 @@ def build_sweep_cfg() -> dict[str, Any]:
     }
 
 
-class AttackIterationsRunner(SweepExperimentRunner):
+class FedAvgBatchSizesRunner(SweepExperimentRunner):
     def __init__(
         self,
         sweep_cfg,

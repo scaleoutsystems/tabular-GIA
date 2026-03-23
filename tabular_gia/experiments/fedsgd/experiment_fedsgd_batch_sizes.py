@@ -34,8 +34,21 @@ def build_sweep_cfg() -> dict[str, Any]:
             "dirichlet_max_attempts": 50,
         },
         "grid": {
-            # Keep the two batch sizes that already separated leakage regimes clearly.
-            "batch_size": [8, 32],
+            "dataset_path_and_meta_path": [
+                [
+                    "data/binary/adult/adult.csv",
+                    "data/binary/adult/adult.yaml",
+                ],
+                [
+                    "data/multiclass/pandemic_movement_office/pandemic_movement_office.csv",
+                    "data/multiclass/pandemic_movement_office/pandemic_movement_office.yaml",
+                ],
+                [
+                    "data/regression/california_housing/california_housing.csv",
+                    "data/regression/california_housing/california_housing.yaml",
+                ],
+            ],
+            "batch_size": [1,2,4,8,16,32,64,128,256]
         },
     }
 
@@ -125,8 +138,8 @@ def build_sweep_cfg() -> dict[str, Any]:
             },
         },
         "grid": {
-            # Isolate attacker label knowledge while keeping attack budget fixed.
-            "invertingconfig": {"label_known": [True, False]},
+            # Nested key sweep example:
+            # "invertingconfig": {"at_iterations": [100, 500, 1000]},
         },
     }
 
@@ -139,7 +152,7 @@ def build_sweep_cfg() -> dict[str, Any]:
     }
 
 
-class LabelKnowledgeRunner(SweepExperimentRunner):
+class FedSGDBatchSizesRunner(SweepExperimentRunner):
     def __init__(
         self,
         sweep_cfg,
@@ -148,6 +161,7 @@ class LabelKnowledgeRunner(SweepExperimentRunner):
         max_parallel_groups: int = 1,
         resume_experiment_dir=None,
     ):
+        # ignore passed sweep_cfg; use hardcoded experiment config
         _ = sweep_cfg
         super().__init__(
             sweep_cfg=build_sweep_cfg(),

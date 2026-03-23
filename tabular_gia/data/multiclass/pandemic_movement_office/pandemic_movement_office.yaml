@@ -1,6 +1,5 @@
-target: 54
+target: target
 task: multiclass
-no_header: true
+no_header: false
 missing_values: ""
 has_test_split: null
-categorical_columns: []

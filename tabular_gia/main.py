@@ -91,6 +91,7 @@ def _run_experiment(
         max_parallel_groups=max_parallel_groups,
         resume_experiment_dir=resume_experiment_dir,
     )
+    runner.experiment_identifier = experiment_name
     runner.run()
 
 

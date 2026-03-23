@@ -270,6 +270,7 @@ class AttackRunner:
             feature_schema=self.feature_schema,
             client_idx=client_idx,
         )
+        true_labels = torch.cat([batch[1] for batch in batch_loader], dim=0).detach().cpu().view(-1)
         reconstruction_metrics = compute_reconstruction_metrics(
             orig_tensor,
             recon_tensor,
@@ -284,7 +285,8 @@ class AttackRunner:
             reconstruction_metrics["per_row_metrics"],
             self.feature_schema,
             client_idx,
-            label_tensor,
+            true_label_tensor=true_labels,
+            recovered_label_tensor=label_tensor,
         )
 
         metrics = dict(reconstruction_metrics["aggregate_metrics"])
@@ -455,7 +457,8 @@ class AttackRunner:
                 reconstruction_metrics["per_row_metrics"],
                 self.feature_schema,
                 client_idx,
-                label_tensor,
+                true_label_tensor=y_stack[c_idx].detach().cpu().view(-1),
+                recovered_label_tensor=label_tensor,
             )
             metrics = dict(reconstruction_metrics["aggregate_metrics"])
             metrics.pop("nn_median", None)

@@ -24,6 +24,7 @@ class TableSpec:
     fieldnames: tuple[str, ...]
     label: str
     mode: str
+    string_fields: tuple[str, ...] = ()
 
 
 class ResultsWriter:
@@ -32,8 +33,17 @@ class ResultsWriter:
         if unknown:
             raise ValueError(f"Unexpected {label} fields: {unknown}")
 
-    def _project_row(self, row: dict, fieldnames: tuple[str, ...]) -> dict:
-        return {field: row[field] if field in row else "" for field in fieldnames}
+    def _project_row(self, row: dict, fieldnames: tuple[str, ...], *, string_fields: set[str]) -> dict:
+        def _normalize_value(field: str, value: object) -> object:
+            if field in string_fields:
+                return "" if value is None else value
+            if value is None:
+                return float("nan")
+            if isinstance(value, str) and value.strip() == "":
+                return float("nan")
+            return value
+
+        return {field: _normalize_value(field, row.get(field)) for field in fieldnames}
 
     def write_rows(
         self,
@@ -43,6 +53,7 @@ class ResultsWriter:
         *,
         label: str,
         mode: str = "w",
+        string_fields: tuple[str, ...] = (),
     ) -> None:
         if not rows:
             return
@@ -50,12 +61,14 @@ class ResultsWriter:
             raise ValueError(f"Unsupported mode '{mode}'. Expected 'w' or 'a'.")
 
         projected_rows: list[dict] = []
+        string_field_set = set(string_fields)
         for row in rows:
             self._validate_unknown_fields(row, fieldnames, label)
             projected_rows.append(
                 self._project_row(
                     row,
                     fieldnames,
+                    string_fields=string_field_set,
                 )
             )
 
@@ -74,13 +87,20 @@ class ResultsWriter:
             spec.fieldnames,
             label=spec.label,
             mode=spec.mode,
+            string_fields=spec.string_fields,
         )
 
 
 class RunCsvWriter:
     _TABLES: dict[str, TableSpec] = {
-        "fl": TableSpec("fl.csv", FL_CSV_FIELDS, "fl.csv", "a"),
-        "attacks": TableSpec("attacks.csv", ATTACKS_CSV_FIELDS, "attacks.csv", "a"),
+        "fl": TableSpec("fl.csv", FL_CSV_FIELDS, "fl.csv", "a", string_fields=("phase",)),
+        "attacks": TableSpec(
+            "attacks.csv",
+            ATTACKS_CSV_FIELDS,
+            "attacks.csv",
+            "a",
+            string_fields=("attack_id", "attack_mode", "checkpoint_type", "checkpoint_label"),
+        ),
         "rounds_summary": TableSpec("rounds_summary.csv", ROUNDS_SUMMARY_CSV_FIELDS, "rounds_summary.csv", "a"),
         "run_summary": TableSpec("run_summary.csv", RUN_SUMMARY_CSV_FIELDS, "run_summary.csv", "a"),
     }
@@ -109,9 +129,21 @@ class RunCsvWriter:
 
 class SweepResultsWriter:
     _AGG_TABLES: dict[str, TableSpec] = {
-        "fl": TableSpec("fl.csv", FL_CSV_FIELDS, "aggregated/fl.csv", "w"),
-        "fl_stats": TableSpec("fl_stats.csv", FL_STATS_CSV_FIELDS, "aggregated/fl_stats.csv", "w"),
-        "attacks": TableSpec("attacks.csv", ATTACKS_CSV_FIELDS, "aggregated/attacks.csv", "w"),
+        "fl": TableSpec("fl.csv", FL_CSV_FIELDS, "aggregated/fl.csv", "w", string_fields=("phase",)),
+        "fl_stats": TableSpec(
+            "fl_stats.csv",
+            FL_STATS_CSV_FIELDS,
+            "aggregated/fl_stats.csv",
+            "w",
+            string_fields=("phase",),
+        ),
+        "attacks": TableSpec(
+            "attacks.csv",
+            ATTACKS_CSV_FIELDS,
+            "aggregated/attacks.csv",
+            "w",
+            string_fields=("attack_id", "attack_mode", "checkpoint_type", "checkpoint_label"),
+        ),
         "rounds_summary": TableSpec("rounds_summary.csv", ROUNDS_SUMMARY_CSV_FIELDS, "aggregated/rounds_summary.csv", "w"),
         "rounds_summary_stats": TableSpec(
             "rounds_summary_stats.csv",

@@ -1,3 +1,4 @@
+# tabular_gia/experiments/experiment_template.py
 from typing import Any
 
 from experiments.sweep_runner import SweepExperimentRunner
@@ -10,7 +11,7 @@ def build_sweep_cfg() -> dict[str, Any]:
             "seed": 42,
         },
         "grid": {
-            "protocol": "fedsgd",
+            "protocol": ["fedsgd"],
             "seed": [7, 13, 42],
         },
     }
@@ -18,8 +19,8 @@ def build_sweep_cfg() -> dict[str, Any]:
     dataset = {
         "default": {
             "dataset_path_and_meta_path": [
-                "data/regression/california_housing/california_housing.csv",
-                "data/regression/california_housing/california_housing.yaml",
+                "data/binary/adult/adult.csv",
+                "data/binary/adult/adult.yaml",
             ],
             "num_workers": 0,
             "pin_memory": True,
@@ -34,7 +35,21 @@ def build_sweep_cfg() -> dict[str, Any]:
             "dirichlet_max_attempts": 50,
         },
         "grid": {
-            "batch_size": [8, 32],
+            "dataset_path_and_meta_path": [
+                #[
+                #    "data/binary/adult/adult.csv",
+                #    "data/binary/adult/adult.yaml",
+                #],
+                [
+                    "data/multiclass/pandemic_movement_office/pandemic_movement_office.csv",
+                    "data/multiclass/pandemic_movement_office/pandemic_movement_office.yaml",
+                ],
+                #[
+                #    "data/regression/california_housing/california_housing.csv",
+                #    "data/regression/california_housing/california_housing.yaml",
+                #],
+            ],
+            "batch_size": [8,32]
         },
     }
 
@@ -77,7 +92,13 @@ def build_sweep_cfg() -> dict[str, Any]:
             },
         },
         "grid": {
-            "preset": ["small", "resnet", "fttransformer"],
+            #"preset": ["small", "resnet", "fttransformer"],
+            "preset": None,
+            "d_hidden": [32, 64, 128],
+            "n_hidden_layers": [1, 2, 3],
+            "norm": ["batchnorm", "layernorm"],
+            "dropout": [0.0, 0.1],
+            "activation": ["relu", "gelu"]
         },
     }
 
@@ -124,7 +145,8 @@ def build_sweep_cfg() -> dict[str, Any]:
             },
         },
         "grid": {
-            "invertingconfig": {"label_known": [True, False]},
+            # Nested key sweep example:
+            # "invertingconfig": {"at_iterations": [100, 500, 1000]},
         },
     }
 
@@ -137,7 +159,7 @@ def build_sweep_cfg() -> dict[str, Any]:
     }
 
 
-class LabelKnowledgeCaliforniaRunner(SweepExperimentRunner):
+class FedSGDTorchModulesRunner(SweepExperimentRunner):
     def __init__(
         self,
         sweep_cfg,
@@ -146,6 +168,7 @@ class LabelKnowledgeCaliforniaRunner(SweepExperimentRunner):
         max_parallel_groups: int = 1,
         resume_experiment_dir=None,
     ):
+        # ignore passed sweep_cfg; use hardcoded experiment config
         _ = sweep_cfg
         super().__init__(
             sweep_cfg=build_sweep_cfg(),
