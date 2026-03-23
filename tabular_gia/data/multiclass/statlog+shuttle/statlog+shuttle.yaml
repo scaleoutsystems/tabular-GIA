@@ -1,6 +1,0 @@
-target: class
-task: multiclass
-no_header: false
-missing_values: ""
-has_test_split: data/multiclass/statlog+shuttle/statlog+shuttle.test.csv
-categorical_columns: []
