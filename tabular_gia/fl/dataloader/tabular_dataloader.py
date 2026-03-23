@@ -497,6 +497,8 @@ def load_dataset(
     logger.info("Loading dataset config: meta=%s data=%s", dataset_meta_path, dataset_path)
     with open(dataset_meta_path, "r") as f:
         meta = yaml.safe_load(f) or {}
+    dataset_family = str(meta.get("dataset_family", "standard")).strip().lower()
+    use_mimic_dataset_logic = dataset_family == "mimic"
 
     # 1.1 handle no_header if present
     no_header = bool(meta.get("no_header", False))
@@ -507,7 +509,7 @@ def load_dataset(
         df = pd.read_csv(dataset_path)
     logger.info("Loaded data: rows=%d cols=%d no_header=%s", df.shape[0], df.shape[1], no_header)
 
-    exclude_cols = meta["exclude_cols"] if "exclude_cols" in meta else []
+    exclude_cols = meta["exclude_cols"] if use_mimic_dataset_logic and "exclude_cols" in meta else []
     if exclude_cols is None:
         exclude_cols = []
 
@@ -524,7 +526,7 @@ def load_dataset(
     y, keep_mask = _clean_target_for_task(y_full, missing_values, task)
     # drop rows with missing targets
     X_full = X_full.loc[keep_mask].reset_index(drop=True)
-    group_split_column = meta.get("group_split_column")
+    group_split_column = meta.get("group_split_column") if use_mimic_dataset_logic else None
     group_values = None
     if group_split_column is not None:
         group_split_column = str(group_split_column)
@@ -613,9 +615,9 @@ def load_dataset(
             stratify=_safe_stratify_labels(y_temp) if task in ("binary", "multiclass") else None,
         )
 
-    feature_drop_cols = list(exclude_cols)
+    feature_drop_cols = list(dict.fromkeys(exclude_cols))
     if group_split_column is not None:
-        feature_drop_cols.append(group_split_column)
+        feature_drop_cols = list(dict.fromkeys(feature_drop_cols + [group_split_column]))
     if feature_drop_cols:
         X_train_split = _drop_feature_columns(X_train_split, feature_drop_cols)
         X_val_split = _drop_feature_columns(X_val_split, feature_drop_cols)
@@ -623,7 +625,9 @@ def load_dataset(
         logger.info("Dropped non-feature columns after splitting: %s", feature_drop_cols)
 
     # 4.1 preprocess splits without one-hot (infer types on train only)
-    meta_num_cols, meta_cat_cols = _resolve_feature_types_from_meta(X_train_split, meta)
+    meta_num_cols, meta_cat_cols = (None, None)
+    if use_mimic_dataset_logic:
+        meta_num_cols, meta_cat_cols = _resolve_feature_types_from_meta(X_train_split, meta)
     X_train_split, num_cols, cat_cols = preprocess(
         X_train_split,
         missing_values,
@@ -653,6 +657,12 @@ def load_dataset(
         "Feature type counts: n_num_features=%d n_cat_features=%d",
         len(num_cols),
         len(cat_cols),
+    )
+    logger.info(
+        "Dataset family path: family=%s feature_types=%s grouped_split=%s",
+        dataset_family,
+        "metadata" if use_mimic_dataset_logic and (meta_num_cols is not None or meta_cat_cols is not None) else "inferred",
+        bool(group_split_column),
     )
 
     # 4.2 derive target classes from train (classification)
@@ -914,6 +924,7 @@ def load_dataset(
         "n_cat_features": len(cat_cols),
         "encoding_mode": encoding_mode,
         "num_classes": len(target_classes) if task in ("binary", "multiclass") else 1,
+        "dataset_family": dataset_family,
         "binary_pos_weight": meta.get("binary_pos_weight"),
         "client_num_mean": [m.tolist() for m in client_num_means],
         "client_num_std": [s.tolist() for s in client_num_stds],

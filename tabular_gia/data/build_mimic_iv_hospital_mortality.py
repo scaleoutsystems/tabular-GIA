@@ -610,6 +610,7 @@ def build_dataset(
         splits_out["test"].to_csv(out_test, index=False)
 
         meta = {
+            "dataset_family": "mimic",
             "target": target_col,
             "task": task,
             "no_header": False,
@@ -683,6 +684,7 @@ def build_dataset(
 
         df.to_csv(out_csv, index=False)
         meta = {
+            "dataset_family": "mimic",
             "target": target_col,
             "task": task,
             "no_header": False,

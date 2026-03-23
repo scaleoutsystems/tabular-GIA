@@ -62,6 +62,21 @@ RUN_SUMMARY_STATS_CSV_FIELDS = (
 )
 
 
+def _as_float_or_nan(value: object) -> float:
+    if value is None:
+        return float("nan")
+    raw = str(value).strip()
+    if raw == "":
+        return float("nan")
+    try:
+        parsed = float(raw)
+    except (TypeError, ValueError):
+        return float("nan")
+    if not math.isfinite(parsed):
+        return float("nan")
+    return parsed
+
+
 def _weighted_metric_means(
     records: List[Dict],
     weights: np.ndarray,
@@ -70,7 +85,7 @@ def _weighted_metric_means(
     metric_keys = [k for k in records[0].keys() if k not in excluded_keys]
     means: Dict[str, float] = {}
     for key in metric_keys:
-        values = np.array([record[key] for record in records], dtype=float)
+        values = np.array([_as_float_or_nan(record.get(key)) for record in records], dtype=float)
         valid = ~np.isnan(values)
         if not valid.any():
             means[key] = float("nan")
@@ -176,16 +191,8 @@ class SeedRunResult(Protocol):
 
 class SeedSummaryBuilder:
     def _to_float(self, value: object) -> float | None:
-        if value is None:
-            return None
-        raw = str(value).strip()
-        if raw == "":
-            return None
-        try:
-            parsed = float(raw)
-        except ValueError:
-            return None
-        if not math.isfinite(parsed):
+        parsed = _as_float_or_nan(value)
+        if math.isnan(parsed):
             return None
         return parsed
 
