@@ -154,7 +154,7 @@ def build_sweep_cfg() -> dict[str, Any]:
     }
 
 
-class FedAvgBatchSizeRunner(SweepExperimentRunner):
+class FedAvgBatchSizesRunner(SweepExperimentRunner):
     def __init__(
         self,
         sweep_cfg,
