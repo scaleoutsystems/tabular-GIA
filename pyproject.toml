@@ -23,7 +23,8 @@ dependencies = [
   "scikit-learn",
   "pydantic",
   "ts2vec",
-  "umap-learn"
+  "umap-learn",
+  "rtdl_revisiting_models"
 ]
 
 [project.optional-dependencies]

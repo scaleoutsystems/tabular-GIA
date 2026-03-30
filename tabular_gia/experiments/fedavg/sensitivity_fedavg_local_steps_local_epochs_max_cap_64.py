@@ -11,7 +11,7 @@ def build_sweep_cfg() -> dict[str, Any]:
             "seed": 42,
         },
         "grid": {
-            "protocol": ["fedsgd", "fedavg"],
+            "protocol": "fedavg",
             "seed": [7, 13, 42],
         },
     }
@@ -37,18 +37,11 @@ def build_sweep_cfg() -> dict[str, Any]:
         "grid": {
             "dataset_path_and_meta_path": [
                 [
-                    "data/binary/adult/adult.csv",
-                    "data/binary/adult/adult.yaml",
-                ],
-                [
-                    "data/multiclass/pandemic_movement_office/pandemic_movement_office.csv",
-                    "data/multiclass/pandemic_movement_office/pandemic_movement_office.yaml",
-                ],
-                [
-                    "data/regression/california_housing/california_housing.csv",
-                    "data/regression/california_housing/california_housing.yaml",
+                    "data/binary/mimic/mimic.csv",
+                    "data/binary/mimic/mimic.yaml",
                 ],
             ],
+            "batch_size": [16,32,64],
         },
     }
 
@@ -91,7 +84,7 @@ def build_sweep_cfg() -> dict[str, Any]:
             },
         },
         "grid": {
-            #"preset": ["small", "resnet", "fttransformer"],
+            "preset": ["resnet", "fttransformer"],
         },
     }
 
@@ -119,6 +112,8 @@ def build_sweep_cfg() -> dict[str, Any]:
                 "lr": 0.01,
             },
             "grid": {
+                "local_epochs": [1,2,5],
+                "max_client_dataset_examples": 64,
 
             },
         },
@@ -154,7 +149,7 @@ def build_sweep_cfg() -> dict[str, Any]:
     }
 
 
-class FedAvgBatchSizesRunner(SweepExperimentRunner):
+class FedAvgLocalStepsLocalEpochsBatchSizesMaxCap32Runner(SweepExperimentRunner):
     def __init__(
         self,
         sweep_cfg,
