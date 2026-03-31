@@ -50,17 +50,9 @@ class AttackScheduler:
     def __init__(
         self,
         *,
-        protocol: str,
         gia_cfg: GiaConfig,
-        fl_cfg: FedAvgConfig | FedSGDConfig,
-        seed: int,
-        client_dataloaders: list[DataLoader],
     ) -> None:
-        self.protocol = protocol
         self.gia_cfg = gia_cfg
-        self.fl_cfg = fl_cfg
-        self.seed = seed
-        self.client_dataloaders = client_dataloaders
 
         self.attack_mode = gia_cfg.attack_mode.strip().lower()
         self.attack_schedule = gia_cfg.attack_schedule.strip().lower()
@@ -77,10 +69,6 @@ class AttackScheduler:
         self.exposure_round_labels: dict[int, list[float]] = {}
         self.next_exposure_idx = 0
         self.total_rounds = 0
-        self.fixed_batch_loaders: dict[int, list[DataLoader]] = {}
-
-        if self.attack_mode == "fixed_batch":
-            self._build_fixed_batch_loaders()
 
     def _build_checkpoint_rounds(self, total_rounds: int) -> set[int] | None:
         if self.attack_schedule == "all":
@@ -151,43 +139,6 @@ class AttackScheduler:
         if self.attack_schedule == "all":
             return "round", "all"
         return "round", str(int(round_idx))
-
-    def _sample_fixed_units(self, num_effective: int, unit_size: int, k_units: int, seed: int) -> list[list[int]]:
-        generator = torch.Generator()
-        generator.manual_seed(int(seed))
-        perm = torch.randperm(num_effective, generator=generator).tolist()
-        selected = perm[: k_units * unit_size]
-        return [selected[i * unit_size : (i + 1) * unit_size] for i in range(k_units)]
-
-    def _build_fixed_batch_loader(self, client_loader: DataLoader, sample_ids: list[int]) -> DataLoader:
-        x_all, y_all = client_loader.dataset.tensors
-        idx = torch.as_tensor(sample_ids, dtype=torch.long)
-        fixed_batch_ds = TensorDataset(x_all.index_select(0, idx), y_all.index_select(0, idx))
-        return DataLoader(fixed_batch_ds, batch_size=int(client_loader.batch_size), shuffle=False)
-
-    def _build_fixed_batch_loaders(self) -> None:
-        local_steps_raw = self.fl_cfg.local_steps
-        local_steps_all = isinstance(local_steps_raw, str) and local_steps_raw.strip().lower() == "all"
-        local_steps = None if local_steps_all else max(1, int(local_steps_raw))
-        base_seed = self.seed
-
-        for client_idx, client_loader in enumerate(self.client_dataloaders):
-            batch_size = int(client_loader.batch_size)
-            num_effective = int(len(client_loader) * batch_size)
-            if self.protocol == "fedsgd":
-                sequence_batches = 1
-            else:
-                sequence_batches = int(len(client_loader)) if local_steps_all else int(local_steps)
-            unit_size = int(sequence_batches * batch_size)
-            seed = base_seed + (client_idx * 1_000_003)
-            unit_sample_ids = self._sample_fixed_units(
-                num_effective=num_effective,
-                unit_size=unit_size,
-                k_units=self.fixed_batch_k,
-                seed=seed,
-            )
-            self.fixed_batch_loaders[client_idx] = [self._build_fixed_batch_loader(client_loader, ids) for ids in unit_sample_ids]
-
 
 class AttackRunner:
     def __init__(
@@ -325,6 +276,7 @@ class AttackRunner:
         round_idx: int,
         checkpoint_type: str,
         checkpoint_label: str,
+        fixed_batch_id: int = -1,
     ) -> list[dict]:
         if not attack_payloads:
             return []
@@ -466,7 +418,7 @@ class AttackRunner:
             metrics["round"] = int(round_idx)
             metrics["client_idx"] = client_idx
             metrics["attack_mode"] = self.attack_mode
-            metrics["fixed_batch_id"] = -1
+            metrics["fixed_batch_id"] = int(fixed_batch_id)
             metrics["exp_min"] = float(attack_context["exp_min"])
             metrics["exp_avg"] = float(attack_context["exp_avg"])
             metrics["exp_max"] = float(attack_context["exp_max"])
@@ -502,11 +454,7 @@ class AttackEngine:
         self.protocol = protocol
         self.gia_cfg = gia_cfg
         self.scheduler = AttackScheduler(
-            protocol=protocol,
             gia_cfg=gia_cfg,
-            fl_cfg=fl_cfg,
-            seed=seed,
-            client_dataloaders=client_dataloaders,
         )
         lr = fl_cfg.lr
         optimizer_name = fl_cfg.optimizer
@@ -567,6 +515,7 @@ class AttackEngine:
         exp_min: float,
         exp_avg: float,
         exp_max: float,
+        fixed_batch_id: int = -1,
     ) -> None:
         scheduled_round = int(round_idx) + 1
         if self.scheduler.total_rounds > 0:
@@ -591,22 +540,11 @@ class AttackEngine:
                 "client_exp": float(current_exposures[client_idx]) if current_exposures else 0.0,
             }
             payload_with_ctx.append((batch_loader, client_idx, client_updates, attack_context))
-            if self.scheduler.attack_mode == "fixed_batch":
-                fixed_batch_loaders = self.scheduler.fixed_batch_loaders[client_idx]
-                for fixed_batch_id, fixed_batch_loader in enumerate(fixed_batch_loaders):
-                    self.runner.run_attack(
-                        att_model=model,
-                        batch_loader=fixed_batch_loader,
-                        round_idx=int(round_idx),
-                        client_idx=client_idx,
-                        client_updates=None,
-                        fixed_batch_id=int(fixed_batch_id),
-                        checkpoint_type=checkpoint_type,
-                        checkpoint_label=checkpoint_label,
-                        attack_context=attack_context,
-                    )
+        effective_fixed_batch_id = -1
         if self.scheduler.attack_mode == "fixed_batch":
-            return
+            effective_fixed_batch_id = int(fixed_batch_id)
+            if effective_fixed_batch_id < 0:
+                raise ValueError("fixed_batch_id must be provided when attack_mode is 'fixed_batch'.")
 
         can_vectorize = (
             self.protocol == "fedsgd"
@@ -625,6 +563,7 @@ class AttackEngine:
                     round_idx=int(round_idx),
                     checkpoint_type=checkpoint_type,
                     checkpoint_label=checkpoint_label,
+                    fixed_batch_id=effective_fixed_batch_id,
                 )
                 return
             except Exception as exc:
@@ -641,7 +580,7 @@ class AttackEngine:
                 round_idx=int(round_idx),
                 client_idx=client_idx,
                 client_updates=client_updates,
-                fixed_batch_id=-1,
+                fixed_batch_id=effective_fixed_batch_id,
                 checkpoint_type=checkpoint_type,
                 checkpoint_label=checkpoint_label,
                 attack_context=attack_context,

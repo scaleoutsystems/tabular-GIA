@@ -33,6 +33,9 @@ class FLTrainResult:
 class FLCallbacks:
     attack_init_fn: Callable[[int], None] | None
     attack_fn: Callable[..., None] | None
+    attack_mode: str = "round_checkpoint"
+    fixed_batch_k: int = 1
+    attack_seed: int = 0
 
 
 class FLTrainer:
@@ -676,6 +679,26 @@ class FedSGDTrainer(FLTrainer):
         exp_avg_prev = 0.0
         exp_max_prev = 0.0
         use_vectorized_clients = cfg.vectorized_clients
+        attack_mode = self.callbacks.attack_mode.strip().lower()
+        fixed_batch_k = max(1, int(self.callbacks.fixed_batch_k))
+        fixed_batch_loaders: dict[int, list[DataLoader]] = {}
+        if self.callbacks.attack_fn is not None and attack_mode == "fixed_batch":
+            base_seed = int(self.callbacks.attack_seed)
+            for client_idx, client_loader in enumerate(self.client_dataloaders):
+                loader_batch_size = int(client_loader.batch_size)
+                num_effective = int(len(client_loader) * loader_batch_size)
+                generator = torch.Generator()
+                generator.manual_seed(base_seed + (client_idx * 1_000_003))
+                perm = torch.randperm(num_effective, generator=generator).tolist()
+                selected = perm[: fixed_batch_k * loader_batch_size]
+                x_all, y_all = client_loader.dataset.tensors
+                client_fixed_loaders: list[DataLoader] = []
+                for fixed_batch_id in range(fixed_batch_k):
+                    sample_ids = selected[fixed_batch_id * loader_batch_size : (fixed_batch_id + 1) * loader_batch_size]
+                    idx = torch.as_tensor(sample_ids, dtype=torch.long)
+                    fixed_ds = TensorDataset(x_all.index_select(0, idx), y_all.index_select(0, idx))
+                    client_fixed_loaders.append(DataLoader(fixed_ds, batch_size=len(fixed_ds), shuffle=False))
+                fixed_batch_loaders[client_idx] = client_fixed_loaders
 
         def next_batch(client_idx: int):
             try:
@@ -798,18 +821,74 @@ class FedSGDTrainer(FLTrainer):
                     float(next_val_exposure),
                     float(exp_min_curr),
                 )
-                if self.callbacks.attack_fn is not None and attack_payloads is not None:
-                    self.callbacks.attack_fn(
-                        model=self.model,
-                        round_idx=int(round_idx),
-                        attack_payloads=attack_payloads,
-                        exp_min_prev=float(exp_min_prev),
-                        exp_min_curr=float(exp_min_curr),
-                        current_exposures=current_exposures,
-                        exp_min=float(exp_min_prev),
-                        exp_avg=float(exp_avg_prev),
-                        exp_max=float(exp_max_prev),
-                    )
+                if self.callbacks.attack_fn is not None:
+                    if attack_mode == "fixed_batch":
+                        for fixed_batch_id in range(fixed_batch_k):
+                            fixed_payloads: list[tuple[DataLoader, int]] = []
+                            per_client_inputs: list[torch.Tensor] = []
+                            per_client_labels: list[torch.Tensor] = []
+                            expected_rows: int | None = None
+                            for client_idx in active_list:
+                                fixed_batch_loader = fixed_batch_loaders[client_idx][fixed_batch_id]
+                                xb = torch.cat([batch[0] for batch in fixed_batch_loader], dim=0)
+                                yb = torch.cat([batch[1] for batch in fixed_batch_loader], dim=0)
+                                rows = int(xb.shape[0])
+                                if expected_rows is None:
+                                    expected_rows = rows
+                                elif rows != expected_rows:
+                                    raise ValueError(
+                                        "Vectorized fixed-batch attack requires same number of rows per client batch."
+                                    )
+                                fixed_payloads.append((fixed_batch_loader, int(client_idx)))
+                                per_client_inputs.append(xb)
+                                per_client_labels.append(yb)
+
+                            gpu_or_cpu = next(model.parameters()).device
+                            inputs_by_client = torch.stack(per_client_inputs, dim=0).to(gpu_or_cpu, non_blocking=True)
+                            labels_by_client = torch.stack(per_client_labels, dim=0).to(gpu_or_cpu, non_blocking=True)
+                            vectorized_loader = DataLoader(
+                                TensorDataset(inputs_by_client, labels_by_client),
+                                batch_size=int(inputs_by_client.shape[0]),
+                                shuffle=False,
+                            )
+                            fixed_gradients = self.train_nostep_fast_vectorized(
+                                model=model,
+                                data=vectorized_loader,
+                                criterion=criterion,
+                                epochs=local_epochs,
+                            )
+                            num_params = len(fixed_gradients)
+                            fixed_attack_payloads: list[tuple[DataLoader, int, list[torch.Tensor | None]]] = []
+                            for c_idx, (fixed_batch_loader, client_idx) in enumerate(fixed_payloads):
+                                grads_full: list[torch.Tensor | None] = [None for _ in range(num_params)]
+                                for p_idx, gradient in enumerate(fixed_gradients):
+                                    if gradient is not None:
+                                        grads_full[p_idx] = gradient[c_idx].detach()
+                                fixed_attack_payloads.append((fixed_batch_loader, client_idx, grads_full))
+                            self.callbacks.attack_fn(
+                                model=self.model,
+                                round_idx=int(round_idx),
+                                attack_payloads=fixed_attack_payloads,
+                                exp_min_prev=float(exp_min_prev),
+                                exp_min_curr=float(exp_min_curr),
+                                current_exposures=current_exposures,
+                                exp_min=float(exp_min_prev),
+                                exp_avg=float(exp_avg_prev),
+                                exp_max=float(exp_max_prev),
+                                fixed_batch_id=int(fixed_batch_id),
+                            )
+                    elif attack_payloads is not None:
+                        self.callbacks.attack_fn(
+                            model=self.model,
+                            round_idx=int(round_idx),
+                            attack_payloads=attack_payloads,
+                            exp_min_prev=float(exp_min_prev),
+                            exp_min_curr=float(exp_min_curr),
+                            current_exposures=current_exposures,
+                            exp_min=float(exp_min_prev),
+                            exp_avg=float(exp_avg_prev),
+                            exp_max=float(exp_max_prev),
+                        )
 
                 if vectorized_this_round and client_gradients is not None:
                     self._fedsgd_train_vectorized(model, client_gradients, lr)

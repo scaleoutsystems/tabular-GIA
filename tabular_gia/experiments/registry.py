@@ -5,6 +5,7 @@ from experiments.fedsgd.experiment_fedsgd_batch_sizes import FedSGDBatchSizesRun
 from experiments.fedsgd.experiment_fedsgd_torch_modules import FedSGDTorchModulesRunner
 from experiments.fedsgd.experiment_fedsgd_attack_iterations import FedSGDAttackIterationsRunner
 from tabular_gia.experiments.fedsgd.experiment_fedsgd_batch_sizes_label_unkown import FedSGDBatchSizesLabelUnkownRunner
+from experiments.fedsgd.experiment_fedsgd_fixed_batch import FedSGDFixedBatchRunner
 
 # fedavg
 from tabular_gia.experiments.fedavg.experiment_fedavg_local_steps_local_epochs_max_cap_32 import FedAvgLocalStepsLocalEpochsBatchSizesMaxCap32Runner
@@ -18,6 +19,7 @@ EXPERIMENT_RUNNERS = {
     "fedsgdtorchmodules": FedSGDTorchModulesRunner,
     "fedsgdattackiterations": FedSGDAttackIterationsRunner,
     "fedsgdbatchsizeslabelunkown": FedSGDBatchSizesLabelUnkownRunner,
+    "fedsgdfixedbatch": FedSGDFixedBatchRunner,
 
     # fedavg
     "fedavglocalstepslocalepochsmaxcap32": FedAvgLocalStepsLocalEpochsBatchSizesMaxCap32Runner,
