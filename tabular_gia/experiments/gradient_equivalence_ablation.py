@@ -5,6 +5,7 @@ import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 import sys
+from typing import Literal
 
 import torch
 from torch import Tensor
@@ -18,15 +19,18 @@ for path in (PROJECT_ROOT, TABULAR_GIA_ROOT):
 
 from configs.base import BaseConfig
 from configs.dataset.dataset import DatasetConfig
+from configs.fl.fedavg import FedAvgConfig
 from configs.fl.fedsgd import FedSGDConfig
 from configs.gia.gia import GiaConfig
 from configs.model.model import ModelConfig
 from leakpro.fl_utils.data_utils import CustomTensorDataset
 from leakpro.fl_utils.gia_optimizers import MetaSGD
-from leakpro.fl_utils.gia_train import train_nostep, train_nostep_vectorized
+from leakpro.fl_utils.gia_train import train, train_nostep, train_nostep_vectorized, train_vectorized
 from leakpro.fl_utils.similarity_measurements import cosine_similarity_weights
 from leakpro.utils.seed import seed_everything
 from tabular_gia.runner.run import RunConfig, build_runtime
+
+Protocol = Literal["fedsgd", "fedavg"]
 
 
 @dataclass(frozen=True)
@@ -71,11 +75,15 @@ def _configure_repro(seed: int) -> None:
     torch.set_float32_matmul_precision("highest")
 
 
-def _build_runtime_for_ablation(seed: int) -> tuple:
-    base_cfg = BaseConfig(seed=seed, protocol="fedsgd")
+def _build_runtime_for_ablation(seed: int, protocol: Protocol, num_clients: int) -> tuple:
+    base_cfg = BaseConfig(seed=seed, protocol=protocol)
     dataset_cfg = DatasetConfig()
-    model_cfg = ModelConfig()
-    fl_cfg = FedSGDConfig()
+    model_cfg = ModelConfig(preset="small")
+    fl_cfg = (
+        FedSGDConfig(num_clients=int(num_clients))
+        if protocol == "fedsgd"
+        else FedAvgConfig(local_steps=1, local_epochs=1, num_clients=int(num_clients))
+    )
     gia_cfg = GiaConfig()
     run_cfg = RunConfig(
         base_cfg=base_cfg,
@@ -94,40 +102,78 @@ def _to_batch_loader(x: Tensor, y: Tensor) -> DataLoader:
     return DataLoader(TensorDataset(x, y), batch_size=int(x.shape[0]), shuffle=False)
 
 
-def _collect_client_batches(client_dataloaders: list[DataLoader], num_clients: int) -> tuple[list[Tensor], list[Tensor]]:
+def _collect_client_batches(client_dataloaders: list[DataLoader], num_clients: int) -> tuple[list[Tensor], list[Tensor], int]:
     x_list: list[Tensor] = []
     y_list: list[Tensor] = []
+    expected_batch_size: int | None = None
     for loader in client_dataloaders[:num_clients]:
         xb, yb = next(iter(loader))
+        local_batch_size = int(loader.batch_size) if loader.batch_size is not None else int(xb.shape[0])
+        if expected_batch_size is None:
+            expected_batch_size = local_batch_size
+        elif local_batch_size != expected_batch_size:
+            raise ValueError(
+                f"Expected same client batch size across selected clients, got {expected_batch_size} and {local_batch_size}."
+            )
         x_list.append(xb.detach().clone())
         y_list.append(yb.detach().clone())
-    return x_list, y_list
+    return x_list, y_list, int(expected_batch_size or 1)
 
 
-def _observed_gradients_std(
+def _observed_updates_std(
     model: torch.nn.Module,
     criterion: torch.nn.Module,
     x_list: list[Tensor],
     y_list: list[Tensor],
+    *,
+    protocol: Protocol,
+    local_epochs: int,
+    fl_lr: float,
+    client_batch_size: int,
 ) -> list[list[Tensor | None]]:
     out: list[list[Tensor | None]] = []
     for x, y in zip(x_list, y_list):
-        loader = _to_batch_loader(x, y)
-        grads = train_nostep(model, loader, MetaSGD(lr=1e-2), criterion, epochs=1)
+        if protocol == "fedavg":
+            loader = DataLoader(TensorDataset(x, y), batch_size=int(client_batch_size), shuffle=False)
+            grads = train(model, loader, MetaSGD(lr=fl_lr), criterion, epochs=int(local_epochs))
+        else:
+            loader = _to_batch_loader(x, y)
+            grads = train_nostep(model, loader, MetaSGD(lr=fl_lr), criterion, epochs=int(local_epochs))
         out.append([g.detach().clone() if g is not None else None for g in grads])
     return out
 
 
-def _observed_gradients_vec(
+def _observed_updates_vec(
     model: torch.nn.Module,
     criterion: torch.nn.Module,
     x_list: list[Tensor],
     y_list: list[Tensor],
+    *,
+    protocol: Protocol,
+    local_epochs: int,
+    fl_lr: float,
+    client_batch_size: int,
 ) -> list[list[Tensor | None]]:
     x_stack = torch.stack(x_list, dim=0)
     y_stack = torch.stack(y_list, dim=0)
     loader = DataLoader(TensorDataset(x_stack, y_stack), batch_size=int(x_stack.shape[0]), shuffle=False)
-    grads_full = train_nostep_vectorized(model, loader, MetaSGD(lr=1e-2), criterion, epochs=1)
+    if protocol == "fedavg":
+        grads_full = train_vectorized(
+            model,
+            loader,
+            MetaSGD(lr=fl_lr),
+            criterion,
+            epochs=int(local_epochs),
+            client_batch_size=int(client_batch_size),
+        )
+    else:
+        grads_full = train_nostep_vectorized(
+            model,
+            loader,
+            MetaSGD(lr=fl_lr),
+            criterion,
+            epochs=int(local_epochs),
+        )
     num_clients = int(x_stack.shape[0])
     out: list[list[Tensor | None]] = []
     for c_idx in range(num_clients):
@@ -168,6 +214,11 @@ def _attack_trace_std(
     observed_grads: list[list[Tensor | None]],
     x0: Tensor,
     y_stack: Tensor,
+    *,
+    protocol: Protocol,
+    local_epochs: int,
+    fl_lr: float,
+    client_batch_size: int,
     steps: int,
     attack_lr: float,
     top10norms: bool,
@@ -185,12 +236,20 @@ def _attack_trace_std(
 
         losses: list[Tensor] = []
         for c_idx in range(num_clients):
-            loader = DataLoader(
-                CustomTensorDataset(recon_params[c_idx], y_stack[c_idx]),
-                batch_size=int(recon_params[c_idx].shape[0]),
-                shuffle=False,
-            )
-            rec_grads = train_nostep(model, loader, MetaSGD(lr=1e-2), criterion, epochs=1)
+            if protocol == "fedavg":
+                loader = DataLoader(
+                    TensorDataset(recon_params[c_idx], y_stack[c_idx]),
+                    batch_size=int(client_batch_size),
+                    shuffle=False,
+                )
+                rec_grads = train(model, loader, MetaSGD(lr=fl_lr), criterion, epochs=int(local_epochs))
+            else:
+                loader = DataLoader(
+                    CustomTensorDataset(recon_params[c_idx], y_stack[c_idx]),
+                    batch_size=int(recon_params[c_idx].shape[0]),
+                    shuffle=False,
+                )
+                rec_grads = train_nostep(model, loader, MetaSGD(lr=fl_lr), criterion, epochs=int(local_epochs))
             loss_c = cosine_similarity_weights(rec_grads, observed_grads[c_idx], top10norms).reshape(())
             losses.append(loss_c)
 
@@ -218,6 +277,11 @@ def _attack_trace_vec(
     observed_grads: list[list[Tensor | None]],
     x0: Tensor,
     y_stack: Tensor,
+    *,
+    protocol: Protocol,
+    local_epochs: int,
+    fl_lr: float,
+    client_batch_size: int,
     steps: int,
     attack_lr: float,
     top10norms: bool,
@@ -237,7 +301,17 @@ def _attack_trace_vec(
             batch_size=int(recon.shape[0]),
             shuffle=False,
         )
-        rec_full = train_nostep_vectorized(model, loader, MetaSGD(lr=1e-2), criterion, epochs=1)
+        if protocol == "fedavg":
+            rec_full = train_vectorized(
+                model,
+                loader,
+                MetaSGD(lr=fl_lr),
+                criterion,
+                epochs=int(local_epochs),
+                client_batch_size=int(client_batch_size),
+            )
+        else:
+            rec_full = train_nostep_vectorized(model, loader, MetaSGD(lr=fl_lr), criterion, epochs=int(local_epochs))
         losses: list[Tensor] = []
         for c_idx in range(num_clients):
             rec_client = [g[c_idx] if g is not None else None for g in rec_full]
@@ -295,8 +369,11 @@ def _mode_diff(left: ModeTrace, right: ModeTrace) -> PairwiseModeDiff:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Ablation: per-step gradient equivalence across 4 FL/attack vectorization modes.")
+    parser.add_argument("--protocol", type=str, choices=["fedsgd", "fedavg"], default="fedavg")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-clients", type=int, default=10, help="Number of clients to include in the ablation.")
+    parser.add_argument("--local-epochs", type=int, default=1, help="Client local epochs for observed update generation.")
+    parser.add_argument("--fl-lr", type=float, default=1e-2, help="MetaSGD LR for observed update generation.")
     parser.add_argument("--steps", type=int, default=1, help="Number of attack optimization steps to compare.")
     parser.add_argument("--attack-lr", type=float, default=0.03)
     parser.add_argument("--top10norms", action="store_true", help="Use top10norms in cosine similarity.")
@@ -304,17 +381,39 @@ def main() -> None:
     args = parser.parse_args()
 
     _configure_repro(args.seed)
-    run_cfg, runtime = _build_runtime_for_ablation(args.seed)
+    protocol: Protocol = "fedavg" if args.protocol == "fedavg" else "fedsgd"
+    run_cfg, runtime = _build_runtime_for_ablation(args.seed, protocol, int(args.num_clients))
     model = runtime.model_wrapper
     model.eval()
     criterion = model.criterion
 
-    x_list, y_list = _collect_client_batches(runtime.client_dataloaders, args.num_clients)
+    if run_cfg.model_cfg.preset != "small":
+        raise ValueError(f"This ablation is restricted to model preset='small', got {run_cfg.model_cfg.preset}.")
+
+    x_list, y_list, client_batch_size = _collect_client_batches(runtime.client_dataloaders, args.num_clients)
     x0 = torch.randn_like(torch.stack(x_list, dim=0))
     y_stack = torch.stack(y_list, dim=0)
 
-    obs_std = _observed_gradients_std(model, criterion, x_list, y_list)
-    obs_vec = _observed_gradients_vec(model, criterion, x_list, y_list)
+    obs_std = _observed_updates_std(
+        model,
+        criterion,
+        x_list,
+        y_list,
+        protocol=protocol,
+        local_epochs=int(args.local_epochs),
+        fl_lr=float(args.fl_lr),
+        client_batch_size=int(client_batch_size),
+    )
+    obs_vec = _observed_updates_vec(
+        model,
+        criterion,
+        x_list,
+        y_list,
+        protocol=protocol,
+        local_epochs=int(args.local_epochs),
+        fl_lr=float(args.fl_lr),
+        client_batch_size=int(client_batch_size),
+    )
     obs_diff = _gradient_diff(obs_std, obs_vec)
 
     modes: dict[str, ModeTrace] = {}
@@ -325,6 +424,10 @@ def main() -> None:
             observed_grads=observed,
             x0=x0,
             y_stack=y_stack,
+            protocol=protocol,
+            local_epochs=int(args.local_epochs),
+            fl_lr=float(args.fl_lr),
+            client_batch_size=int(client_batch_size),
             steps=args.steps,
             attack_lr=args.attack_lr,
             top10norms=args.top10norms,
@@ -336,6 +439,10 @@ def main() -> None:
             observed_grads=observed,
             x0=x0,
             y_stack=y_stack,
+            protocol=protocol,
+            local_epochs=int(args.local_epochs),
+            fl_lr=float(args.fl_lr),
+            client_batch_size=int(client_batch_size),
             steps=args.steps,
             attack_lr=args.attack_lr,
             top10norms=args.top10norms,
@@ -352,14 +459,17 @@ def main() -> None:
     summary = {
         "config": {
             "seed": int(args.seed),
+            "protocol": str(protocol),
             "num_clients": int(args.num_clients),
+            "local_epochs": int(args.local_epochs),
+            "fl_lr": float(args.fl_lr),
             "steps": int(args.steps),
             "attack_lr": float(args.attack_lr),
             "top10norms": bool(args.top10norms),
             "dataset_path": run_cfg.dataset_cfg.dataset_path,
             "dataset_meta_path": run_cfg.dataset_cfg.dataset_meta_path,
             "batch_size": int(run_cfg.dataset_cfg.batch_size),
-            "model_preset": run_cfg.model_cfg.preset,
+            "model_preset": "small",
         },
         "observed_gradient_equivalence_std_vs_vec_fl": asdict(obs_diff),
         "pairwise_mode_diffs": {name: asdict(diff) for name, diff in comparisons.items()},

@@ -16,7 +16,7 @@ from configs.fl.fedsgd import FedSGDConfig
 from configs.gia.gia import GiaConfig
 from leakpro.attacks.gia_attacks.invertinggradients import InvertingConfig, InvertingGradients
 from leakpro.fl_utils.data_utils import GiaTabularExtension
-from leakpro.fl_utils.gia_optimizers import MetaAdam, MetaSGD
+from leakpro.fl_utils.gia_optimizers import MetaSGD
 from leakpro.fl_utils.gia_train import train, train_nostep
 from tabular_gia.metrics.tabular_metrics import (
     compute_reconstruction_metrics,
@@ -288,6 +288,7 @@ class AttackRunner:
         attack_contexts: list[dict] = []
         observed_updates: list[list[torch.Tensor | None]] = []
         expected_rows: int | None = None
+        expected_client_batch_size: int | None = None
         for batch_loader, client_idx, client_updates, attack_context in attack_payloads:
             if client_updates is None:
                 raise ValueError("Vectorized attack requires observed gradients for every payload.")
@@ -298,6 +299,11 @@ class AttackRunner:
                 expected_rows = rows
             elif rows != expected_rows:
                 raise ValueError("Vectorized attack requires same number of rows per client batch.")
+            client_batch_size = int(batch_loader.batch_size) if batch_loader.batch_size is not None else rows
+            if expected_client_batch_size is None:
+                expected_client_batch_size = client_batch_size
+            elif client_batch_size != expected_client_batch_size:
+                raise ValueError("Vectorized attack requires same client local batch size across payloads.")
             x_per_client.append(xb.detach().cpu())
             y_per_client.append(yb.detach().cpu())
             client_ids.append(int(client_idx))
@@ -334,6 +340,7 @@ class AttackRunner:
             )
 
         attack_cfg = deepcopy(self.attack_cfg_base)
+        attack_cfg.vectorized_client_batch_size = expected_client_batch_size
         attacker = InvertingGradients(
             att_model,
             batch_loader,
@@ -458,7 +465,9 @@ class AttackEngine:
         )
         lr = fl_cfg.lr
         optimizer_name = fl_cfg.optimizer
-        optimizer = MetaAdam(lr=lr) if optimizer_name == "MetaAdam" else MetaSGD(lr=lr)
+        if optimizer_name != "MetaSGD":
+            raise ValueError(f"Only MetaSGD is supported, got optimizer='{optimizer_name}'.")
+        optimizer = MetaSGD(lr=lr)
         invertingconfig = asdict(gia_cfg.invertingconfig)
         invertingconfig.pop("data_extension", None)
         attack_cfg_base = InvertingConfig(
@@ -547,7 +556,7 @@ class AttackEngine:
                 raise ValueError("fixed_batch_id must be provided when attack_mode is 'fixed_batch'.")
 
         can_vectorize = (
-            self.protocol == "fedsgd"
+            self.protocol in {"fedsgd", "fedavg"}
             and self.gia_cfg.vectorized_attacks
             and len(payload_with_ctx) > 1
             and all(client_updates is not None for _bl, _cid, client_updates, _ctx in payload_with_ctx)
@@ -568,7 +577,7 @@ class AttackEngine:
                 return
             except Exception as exc:
                 logger.warning(
-                    "Batched FedSGD attack fallback to per-client mode at round=%d due to: %s",
+                    "Batched vectorized attack fallback to per-client mode at round=%d due to: %s",
                     int(round_idx),
                     exc,
                 )

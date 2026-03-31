@@ -15,7 +15,7 @@ from leakpro.attacks.gia_attacks.abstract_gia import AbstractGIA
 from leakpro.fl_utils.data_utils import CustomTensorDataset
 from leakpro.fl_utils.data_utils import GiaImageExtension, GiaTabularExtension
 from leakpro.fl_utils.gia_optimizers import MetaSGD
-from leakpro.fl_utils.gia_train import train, train_nostep_vectorized
+from leakpro.fl_utils.gia_train import train, train_nostep_vectorized, train_vectorized
 from leakpro.fl_utils.similarity_measurements import (
     cosine_similarity_weights,
     total_variation,
@@ -50,6 +50,8 @@ class InvertingConfig:
     median_pooling: bool = False
     # if we compare difference only for top 10 layers with largest changes. Potentially good for larger models.
     top10norms: bool = False
+    # local mini-batch size used by vectorized tabular train-style attack paths (FedAvg).
+    vectorized_client_batch_size: int | None = None
 
 class InvertingGradients(AbstractGIA):
     """Gradient inversion attack by Geiping et al."""
@@ -88,6 +90,7 @@ class InvertingGradients(AbstractGIA):
         self.observed_client_gradient = observed_client_gradient
         self.vectorized_last_client_losses: Optional[Tensor] = None
         self.vectorized_best_client_losses: Optional[Tensor] = None
+        self.vectorized_train_fn = train_vectorized if self.train_fn is train else train_nostep_vectorized
 
         logger.info("Inverting gradient initialized.")
 
@@ -241,13 +244,24 @@ class InvertingGradients(AbstractGIA):
             self.client_gradient = [p.detach() if p is not None else None for p in self.observed_client_gradient]
             return
         if self.reconstruction.dim() == 3:
-            client_gradient = train_nostep_vectorized(
-                self.model,
-                self.client_loader,
-                self._new_meta_optimizer(),
-                self.configs.criterion,
-                self.configs.epochs,
-            )
+            if self.vectorized_train_fn is train_vectorized:
+                client_gradient = self.vectorized_train_fn(
+                    self.model,
+                    self.client_loader,
+                    self._new_meta_optimizer(),
+                    self.configs.criterion,
+                    self.configs.epochs,
+                    client_batch_size=self.configs.vectorized_client_batch_size,
+                )
+            else:
+                client_gradient = self.vectorized_train_fn(
+                    self.model,
+                    self.client_loader,
+                    None,
+                    self.configs.criterion,
+                    self.configs.epochs,
+                    client_batch_size=self.configs.vectorized_client_batch_size,
+                )
         else:
             client_gradient = self.train_fn(
                 self.model,
@@ -276,13 +290,24 @@ class InvertingGradients(AbstractGIA):
             )
         if self.client_gradient is None:
             raise ValueError("Missing observed gradients for vectorized tabular attack.")
-        rec_grads_full = train_nostep_vectorized(
-            self.model,
-            self.reconstruction_loader,
-            None, # self._new_meta_optimizer(),
-            self.configs.criterion,
-            self.configs.epochs,
-        )
+        if self.vectorized_train_fn is train_vectorized:
+            rec_grads_full = self.vectorized_train_fn(
+                self.model,
+                self.reconstruction_loader,
+                self._new_meta_optimizer(),
+                self.configs.criterion,
+                self.configs.epochs,
+                client_batch_size=self.configs.vectorized_client_batch_size,
+            )
+        else:
+            rec_grads_full = self.vectorized_train_fn(
+                self.model,
+                self.reconstruction_loader,
+                None, # self._new_meta_optimizer(),
+                self.configs.criterion,
+                self.configs.epochs,
+                client_batch_size=self.configs.vectorized_client_batch_size,
+            )
 
         if len(rec_grads_full) != len(self.client_gradient):
             raise ValueError(
