@@ -40,14 +40,14 @@ def build_sweep_cfg() -> dict[str, Any]:
                     "data/binary/adult/adult.csv",
                     "data/binary/adult/adult.yaml",
                 ],
-                #[
-                #    "data/multiclass/pandemic_movement_office/pandemic_movement_office.csv",
-                #    "data/multiclass/pandemic_movement_office/pandemic_movement_office.yaml",
-                #],
-                #[
-                #    "data/regression/california_housing/california_housing.csv",
-                #    "data/regression/california_housing/california_housing.yaml",
-                #],
+                [
+                    "data/multiclass/pandemic_movement_office/pandemic_movement_office.csv",
+                    "data/multiclass/pandemic_movement_office/pandemic_movement_office.yaml",
+                ],
+                [
+                    "data/regression/california_housing/california_housing.csv",
+                    "data/regression/california_housing/california_housing.yaml",
+                ],
             ],
             "batch_size": [8,16,32],
         },
@@ -118,6 +118,7 @@ def build_sweep_cfg() -> dict[str, Any]:
                 "min_exposure": 25.0,
                 "optimizer": "MetaSGD",
                 "lr": 0.01,
+                "vectorized_clients": True,
             },
             "grid": {
                 "local_epochs": [1,5],
