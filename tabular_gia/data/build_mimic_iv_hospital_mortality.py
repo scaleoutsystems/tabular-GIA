@@ -15,10 +15,11 @@ All one-to-many features are converted to per-admission features using hadm_id, 
 into prior-history features per subject to preserve admission-time availability.
 
 How to run (from repo root):
-    # Binary tier1
-    python tabular_gia/data/build_mimic_iv_hospital_mortality.py --tier tier1 --task binary
+    # Default build: tier3 binary with a deterministic 30k-row sample
+    python tabular_gia/data/build_mimic_iv_hospital_mortality.py
 
-    # Binary tier2 and tier3 (100 top diagnoses/medications by default)
+    # Other binary variants
+    python tabular_gia/data/build_mimic_iv_hospital_mortality.py --tier tier1 --task binary
     python tabular_gia/data/build_mimic_iv_hospital_mortality.py --tier tier2 --task binary
     python tabular_gia/data/build_mimic_iv_hospital_mortality.py --tier tier3 --task binary
 
@@ -26,7 +27,7 @@ How to run (from repo root):
     python tabular_gia/data/build_mimic_iv_hospital_mortality.py --tier tier2 --task multiclass
     python tabular_gia/data/build_mimic_iv_hospital_mortality.py --tier tier2 --task regression
 
-    # Quick smoke test on fewer rows
+    # Explicit row-cap override
     python tabular_gia/data/build_mimic_iv_hospital_mortality.py --tier tier3 --task binary --max-rows 50000
 
 Notes:
@@ -368,6 +369,50 @@ def _derive_target(df: pd.DataFrame, task: str) -> tuple[pd.DataFrame, str]:
     raise ValueError(f"Unknown task '{task}'.")
 
 
+def _cap_rows_deterministic(
+    df: pd.DataFrame,
+    *,
+    max_rows: int,
+    seed: int,
+    task: str,
+) -> pd.DataFrame:
+    if max_rows <= 0 or len(df) <= max_rows:
+        return df
+
+    if task == "binary" and "hospital_expire_flag" in df.columns:
+        target = pd.to_numeric(df["hospital_expire_flag"], errors="coerce")
+        if target.isin([0, 1]).all():
+            class_counts = target.value_counts().sort_index()
+            raw_alloc = (class_counts / float(len(df))) * int(max_rows)
+            alloc = raw_alloc.astype(int)
+            remainder = int(max_rows) - int(alloc.sum())
+            if remainder > 0:
+                fractional = (raw_alloc - alloc).sort_values(ascending=False)
+                for cls in fractional.index.tolist()[:remainder]:
+                    alloc.loc[cls] += 1
+            alloc = alloc.clip(upper=class_counts)
+            shortfall = int(max_rows) - int(alloc.sum())
+            if shortfall > 0:
+                spare = (class_counts - alloc).sort_values(ascending=False)
+                for cls in spare.index.tolist():
+                    if shortfall <= 0:
+                        break
+                    add = int(min(shortfall, spare.loc[cls]))
+                    alloc.loc[cls] += add
+                    shortfall -= add
+
+            sampled_parts = []
+            for cls in class_counts.index.tolist():
+                take = int(alloc.loc[cls])
+                if take <= 0:
+                    continue
+                cls_df = df.loc[target.eq(cls)]
+                sampled_parts.append(cls_df.sample(n=take, random_state=seed))
+            return pd.concat(sampled_parts, axis=0).sort_index().reset_index(drop=True)
+
+    return df.sample(n=int(max_rows), random_state=seed).sort_index().reset_index(drop=True)
+
+
 def _default_out_dir(task: str, tier: str) -> Path:
     if task == "binary":
         root = Path("tabular_gia/data/binary")
@@ -434,6 +479,7 @@ def build_dataset(
     top_k_diagnoses: int = 100,
     top_k_medications: int = 100,
     max_rows: int | None = None,
+    sample_seed: int = 42,
     strict_prior_by_time: bool = False,
     subject_disjoint_split: bool = False,
     split_seed: int = 42,
@@ -445,7 +491,12 @@ def build_dataset(
 
     df = _build_base_admissions(mimic_root, strict_prior_by_time=strict_prior_by_time)
     if max_rows is not None and max_rows > 0:
-        df = df.head(max_rows).copy()
+        df = _cap_rows_deterministic(
+            df,
+            max_rows=int(max_rows),
+            seed=int(sample_seed),
+            task=task,
+        ).copy()
 
     base_numeric_cols = [
         "age_at_admit_est",
@@ -720,7 +771,7 @@ def main() -> None:
     parser.add_argument(
         "--tier",
         choices=["tier1", "tier2", "tier3"],
-        default="tier1",
+        default="tier3",
         help="Feature complexity tier",
     )
     parser.add_argument(
@@ -744,8 +795,14 @@ def main() -> None:
     parser.add_argument(
         "--max-rows",
         type=int,
-        default=0,
-        help="Optional row cap for quick tests (0 = all rows)",
+        default=30000,
+        help="Deterministic row cap (default 30000, 0 = all rows)",
+    )
+    parser.add_argument(
+        "--sample-seed",
+        type=int,
+        default=42,
+        help="Random seed used for deterministic row sampling when max_rows is set.",
     )
     parser.add_argument(
         "--allow-same-time-prior",
@@ -805,6 +862,7 @@ def main() -> None:
         top_k_diagnoses=args.top_k_diagnoses,
         top_k_medications=args.top_k_medications,
         max_rows=max_rows,
+        sample_seed=int(args.sample_seed),
         strict_prior_by_time=(not bool(args.allow_same_time_prior)),
         subject_disjoint_split=(bool(args.write_subject_disjoint_splits) and not bool(args.allow_subject_overlap_split)),
         split_seed=int(args.split_seed),
