@@ -571,10 +571,11 @@ def _plot_batch_split_metric_grid(
                             baseline_rows = curve_rows.dropna(subset=[baseline_col]).copy()
                             if baseline_rows.empty:
                                 continue
+                            baseline_color = "0.25" if "prior_" in baseline_col else "0.45"
                             ax.plot(
                                 baseline_rows["exp_min"].to_numpy(dtype=float),
                                 baseline_rows[baseline_col].to_numpy(dtype=float),
-                                color=color,
+                                color=baseline_color,
                                 linestyle=linestyle,
                                 linewidth=1.1,
                                 alpha=0.95,
@@ -634,7 +635,7 @@ def _plot_batch_split_metric_grid(
         fig.text(
             0.5,
             0.915,
-            "Solid = attack, dashed = Client Prior Baseline, dotted = Uniform Random Baseline",
+            "Dashed = Client Prior Baseline, dotted = Uniform Random Baseline",
             ha="center",
             va="center",
             fontsize=9.5,
