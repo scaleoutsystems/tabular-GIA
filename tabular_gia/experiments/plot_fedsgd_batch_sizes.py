@@ -1,7 +1,5 @@
 import argparse
-import json
 from pathlib import Path
-from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -12,403 +10,61 @@ from plot_fl_training import (
     plot_fl_metric_vs_exposure_on_axes,
 )
 from plot_helper import (
+    ATTACK_METRIC_LABEL,
     DATASET_CLEAN_NAMES,
-    DEFAULT_Y_BY_TASK,
     FL_METRIC_CLEAN_NAMES,
     MODEL_CLEAN_NAMES,
+    PLOT_MARKER_EDGECOLOR,
+    PLOT_MARKER_EDGEWIDTH,
+    PLOT_MARKERS,
+    PLOT_LINEWIDTH,
+    PLOT_MARKER_ZORDER,
+    PLOT_MARKERSIZE,
+    PLOT_SCATTER_SIZE,
     PROTOCOL_CLEAN_NAMES,
     TASK_CLEAN_NAMES,
     X_AXIS_CLEAN_NAMES,
+    align_attack_and_utility as _align_attack_and_utility,
+    annotate_checkpoint_progress as _annotate_checkpoint_progress,
+    apply_axis_finish as _apply_axis_finish,
+    collect_run_tables as _collect_run_tables_base,
+    errorbar_yerr as _errorbar_yerr,
     clean_name,
     fl_metric_limits,
-    infer_task_objective,
+    load_basic_run_metadata,
     metric_for_final_test,
+    ordered_model_names as _ordered_model_names,
+    plot_line_with_band as _plot_line_with_band,
+    prepare_plot_dirs,
+    rename_plot_columns as _rename_plot_columns,
+    resolve_experiment_dir as _resolve_experiment_dir,
+    sample_utility_at_attack_checkpoints as _sample_utility_at_attack_checkpoints,
+    sanitize_for_filename as _sanitize_for_filename,
+    save_figure as _save_figure,
+    batch_styles as shared_batch_styles,
+    sample_checkpoint_colors,
+    sample_group_colors,
     set_plot_paper_style,
+    style_legend,
 )
+BOUNDED_METRIC_YMAX = 1.0
 
-DEFAULT_RESULTS_ROOTS = (
-    Path("tabular_gia/results/experiments"),
-    Path("results/experiments"),
-)
-MARKERS = ["o", "s", "^", "D", "v", "P", "X", "*", "<", ">"]
-ATTACK_METRIC_LABEL = "Reconstruction Accuracy"
-BOUNDED_METRIC_YMAX = 1.03
-
-
-def _resolve_experiment_dir(results_root: str, experiment_dir: str) -> Path:
-    path = Path(experiment_dir)
-    if path.is_absolute():
-        if not path.exists():
-            raise FileNotFoundError(f"Experiment directory not found: {path}")
-        return path
-
-    if results_root:
-        candidate = Path(results_root) / experiment_dir
-        if not candidate.exists():
-            raise FileNotFoundError(f"Experiment directory not found: {candidate}")
-        return candidate
-
-    for root in DEFAULT_RESULTS_ROOTS:
-        candidate = root / experiment_dir
-        if candidate.exists():
-            return candidate
-
-    searched = ", ".join(str(root / experiment_dir) for root in DEFAULT_RESULTS_ROOTS)
-    raise FileNotFoundError(f"Experiment directory not found. Checked: {searched}")
-
-
-def _get_nested(cfg: dict[str, Any], path: str, default: Any = None) -> Any:
-    cur: Any = cfg
-    for part in path.split("."):
-        if not isinstance(cur, dict) or part not in cur:
-            return default
-        cur = cur[part]
-    return cur
-
-
-def _load_run_metadata(run_dir: Path) -> dict[str, Any] | None:
-    cfg_path = run_dir / "run_config.json"
-    if not cfg_path.exists():
-        return None
-    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-
-    dataset_path = str(_get_nested(cfg, "dataset.dataset_path", "unknown"))
-    dataset_name = Path(dataset_path).stem
-    model_name = str(_get_nested(cfg, "model.preset") or _get_nested(cfg, "model.arch") or "unknown")
-    task_objective = infer_task_objective(dataset_name=dataset_name, dataset_path=dataset_path)
-    return {
-        "dataset_name": dataset_name,
-        "dataset_path": dataset_path,
-        "batch_size": int(_get_nested(cfg, "dataset.batch_size")),
-        "model_name": model_name,
-        "task_objective": task_objective,
-        "utility_metric": DEFAULT_Y_BY_TASK.get(task_objective, "val_loss"),
-        "run_id": run_dir.name,
-    }
-
-
-def _base_frame(metadata: dict[str, Any], size: int) -> pd.DataFrame:
-    return pd.DataFrame({key: [value] * size for key, value in metadata.items()})
-
-
-def _load_attack_curve(run_dir: Path, metadata: dict[str, Any]) -> pd.DataFrame | None:
-    stats_csv = run_dir / "aggregated" / "rounds_summary_stats.csv"
-    summary_csv = run_dir / "aggregated" / "rounds_summary.csv"
-    attack_metric_cols = [
-        "tableak_acc",
-        "num_acc",
-        "cat_acc",
-        "prior_tableak_acc",
-        "prior_num_acc",
-        "prior_cat_acc",
-        "random_tableak_acc",
-        "random_num_acc",
-        "random_cat_acc",
-    ]
-
-    if stats_csv.exists():
-        df = pd.read_csv(stats_csv)
-        required = {"exp_min_mean", "tableak_acc_mean"}
-        if not required.issubset(df.columns):
-            return None
-        out = pd.DataFrame({"exp_min": pd.to_numeric(df["exp_min_mean"], errors="coerce")})
-        for metric in attack_metric_cols:
-            out[metric] = pd.to_numeric(df.get(f"{metric}_mean"), errors="coerce")
-            out[f"{metric}_ci95"] = pd.to_numeric(df.get(f"{metric}_ci95"), errors="coerce")
-    elif summary_csv.exists():
-        df = pd.read_csv(summary_csv)
-        required = {"exp_min", "tableak_acc"}
-        if not required.issubset(df.columns):
-            return None
-        out = pd.DataFrame({"exp_min": pd.to_numeric(df["exp_min"], errors="coerce")})
-        for metric in attack_metric_cols:
-            out[metric] = pd.to_numeric(df.get(metric), errors="coerce")
-            out[f"{metric}_ci95"] = np.nan
-    else:
-        return None
-
-    out = out.dropna(subset=["exp_min", "tableak_acc"]).sort_values("exp_min").reset_index(drop=True)
-    if out.empty:
-        return None
-    return pd.concat([_base_frame(metadata, len(out)), out], axis=1)
-
-
-def _load_utility_curve(run_dir: Path, metadata: dict[str, Any]) -> pd.DataFrame | None:
-    metric = metadata["utility_metric"]
-    stats_csv = run_dir / "aggregated" / "fl_stats.csv"
-    fl_csv = run_dir / "aggregated" / "fl.csv"
-
-    if stats_csv.exists():
-        df = pd.read_csv(stats_csv)
-        df = df[df["phase"] == "checkpoint"].copy()
-        x_col = "exp_min_mean"
-        y_col = f"{metric}_mean"
-        ci_col = f"{metric}_ci95"
-        if x_col not in df.columns or y_col not in df.columns:
-            return None
-        out = pd.DataFrame(
-            {
-                "exp_min": pd.to_numeric(df[x_col], errors="coerce"),
-                "utility_value": pd.to_numeric(df[y_col], errors="coerce"),
-                "utility_ci95": pd.to_numeric(df.get(ci_col), errors="coerce"),
-            }
-        )
-    elif fl_csv.exists():
-        df = pd.read_csv(fl_csv)
-        df = df[df["phase"] == "checkpoint"].copy()
-        if "exp_min" not in df.columns or metric not in df.columns:
-            return None
-        out = pd.DataFrame(
-            {
-                "exp_min": pd.to_numeric(df["exp_min"], errors="coerce"),
-                "utility_value": pd.to_numeric(df[metric], errors="coerce"),
-                "utility_ci95": np.nan,
-            }
-        )
-    else:
-        return None
-
-    out = out.dropna(subset=["exp_min", "utility_value"]).sort_values("exp_min").reset_index(drop=True)
-    if out.empty:
-        return None
-    return pd.concat([_base_frame(metadata, len(out)), out], axis=1)
-
-
-def _load_final_test_point(run_dir: Path, metadata: dict[str, Any]) -> pd.DataFrame | None:
-    metric = metric_for_final_test(str(metadata["utility_metric"]))
-    stats_csv = run_dir / "aggregated" / "fl_stats.csv"
-    fl_csv = run_dir / "aggregated" / "fl.csv"
-
-    if stats_csv.exists():
-        df = pd.read_csv(stats_csv)
-        df = df[df["phase"] == "final_test"].copy()
-        x_col = "exp_min_mean"
-        y_col = f"{metric}_mean"
-        ci_col = f"{metric}_ci95"
-        if x_col not in df.columns or y_col not in df.columns or df.empty:
-            return None
-        out = pd.DataFrame(
-            {
-                "exp_min": pd.to_numeric(df[x_col], errors="coerce"),
-                "utility_value": pd.to_numeric(df[y_col], errors="coerce"),
-                "utility_ci95": pd.to_numeric(df.get(ci_col), errors="coerce"),
-                "utility_metric": metric,
-            }
-        )
-    elif fl_csv.exists():
-        df = pd.read_csv(fl_csv)
-        df = df[df["phase"] == "final_test"].copy()
-        if "exp_min" not in df.columns or metric not in df.columns or df.empty:
-            return None
-        out = pd.DataFrame(
-            {
-                "exp_min": pd.to_numeric(df["exp_min"], errors="coerce"),
-                "utility_value": pd.to_numeric(df[metric], errors="coerce"),
-                "utility_ci95": np.nan,
-                "utility_metric": metric,
-            }
-        )
-    else:
-        return None
-
-    out = out.dropna(subset=["exp_min", "utility_value"]).sort_values("exp_min").reset_index(drop=True)
-    if out.empty:
-        return None
-    base = _base_frame(metadata, len(out))
-    base["utility_metric"] = [metric] * len(out)
-    return pd.concat([base, out[["exp_min", "utility_value", "utility_ci95"]]], axis=1)
-
-
-def _interpolate_series(frame: pd.DataFrame, x_col: str, y_col: str, targets: np.ndarray) -> np.ndarray:
-    src = frame[[x_col, y_col]].dropna().sort_values(x_col)
-    if src.empty:
-        return np.full(len(targets), np.nan, dtype=float)
-    src = src.groupby(x_col, as_index=False).mean(numeric_only=True)
-    x = src[x_col].to_numpy(dtype=float)
-    y = src[y_col].to_numpy(dtype=float)
-    if len(x) == 1:
-        out = np.full(len(targets), y[0], dtype=float)
-        out[(targets < x[0]) | (targets > x[0])] = np.nan
-        return out
-
-    out = np.interp(targets, x, y, left=np.nan, right=np.nan)
-    out[(targets < x.min()) | (targets > x.max())] = np.nan
-    return out
-
-
-def _align_attack_and_utility(
-    attack_curve: pd.DataFrame,
-    utility_curve: pd.DataFrame,
-    metadata: dict[str, Any],
-) -> pd.DataFrame:
-    targets = attack_curve["exp_min"].to_numpy(dtype=float)
-    utility_interp = _interpolate_series(utility_curve, "exp_min", "utility_value", targets)
-    out = attack_curve[["exp_min", "tableak_acc"]].copy()
-    out["utility_value"] = utility_interp
-    out = out.dropna(subset=["utility_value"]).reset_index(drop=True)
-    if out.empty:
-        return out
-    return pd.concat([_base_frame(metadata, len(out)), out], axis=1)
-
-
-def _sample_utility_at_attack_checkpoints(
-    attack_rows: pd.DataFrame,
-    utility_rows: pd.DataFrame,
-) -> pd.DataFrame:
-    if attack_rows.empty or utility_rows.empty:
-        return pd.DataFrame()
-
-    join_cols = ["dataset_name", "dataset_path", "batch_size", "model_name", "task_objective", "utility_metric", "run_id"]
-    sampled_frames: list[pd.DataFrame] = []
-
-    for key, attack_sub in attack_rows.groupby(join_cols, dropna=False, sort=False):
-        utility_sub = utility_rows
-        for col, value in zip(join_cols, key, strict=False):
-            utility_sub = utility_sub[utility_sub[col] == value]
-        if utility_sub.empty:
-            continue
-
-        utility_sub = utility_sub.sort_values("exp_min").reset_index(drop=True)
-        utility_x = utility_sub["exp_min"].to_numpy(dtype=float)
-        utility_y = utility_sub["utility_value"].to_numpy(dtype=float)
-        utility_ci = utility_sub["utility_ci95"].to_numpy(dtype=float)
-
-        attack_sub = attack_sub.sort_values("exp_min").reset_index(drop=True).copy()
-        targets = attack_sub["exp_min"].to_numpy(dtype=float)
-        nearest_idx = np.abs(utility_x[:, None] - targets[None, :]).argmin(axis=0)
-
-        attack_sub["utility_value"] = utility_y[nearest_idx]
-        attack_sub["utility_ci95"] = utility_ci[nearest_idx]
-        attack_sub["utility_exp_min"] = utility_x[nearest_idx]
-        sampled_frames.append(attack_sub)
-
-    if not sampled_frames:
-        return pd.DataFrame()
-    return pd.concat(sampled_frames, axis=0, ignore_index=True)
-
+def _load_run_metadata(run_dir: Path) -> dict[str, object] | None:
+    return load_basic_run_metadata(run_dir)
 
 def _collect_run_tables(
     experiment_dir: Path,
     protocol_subdir: str,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    protocol_dir = experiment_dir / protocol_subdir
-    if not protocol_dir.exists():
-        raise FileNotFoundError(f"Protocol directory not found: {protocol_dir}")
-
-    attack_frames: list[pd.DataFrame] = []
-    utility_frames: list[pd.DataFrame] = []
-    pareto_frames: list[pd.DataFrame] = []
-    final_test_frames: list[pd.DataFrame] = []
-    skipped: list[str] = []
-
-    for run_dir in sorted(protocol_dir.glob("run_*")):
-        metadata = _load_run_metadata(run_dir)
-        if metadata is None:
-            skipped.append(f"{run_dir.name}:missing_run_config")
-            continue
-        attack_curve = _load_attack_curve(run_dir, metadata)
-        utility_curve = _load_utility_curve(run_dir, metadata)
-        if attack_curve is None or utility_curve is None:
-            skipped.append(f"{run_dir.name}:missing_attack_or_utility")
-            continue
-
-        attack_frames.append(attack_curve)
-        utility_frames.append(utility_curve)
-        final_test_point = _load_final_test_point(run_dir, metadata)
-        if final_test_point is not None:
-            final_test_frames.append(final_test_point)
-
-        pareto = _align_attack_and_utility(attack_curve, utility_curve, metadata)
-        if not pareto.empty:
-            pareto_frames.append(pareto)
-
-    if not attack_frames or not utility_frames:
-        raise FileNotFoundError(f"No usable run curves found under {protocol_dir}")
-
-    if skipped:
-        print(f"Skipped {len(skipped)} run(s): {', '.join(skipped)}")
-
-    return (
-        pd.concat(attack_frames, axis=0, ignore_index=True),
-        pd.concat(utility_frames, axis=0, ignore_index=True),
-        pd.concat(pareto_frames, axis=0, ignore_index=True) if pareto_frames else pd.DataFrame(),
-        pd.concat(final_test_frames, axis=0, ignore_index=True) if final_test_frames else pd.DataFrame(),
+    return _collect_run_tables_base(
+        experiment_dir=experiment_dir,
+        protocol_subdir=protocol_subdir,
+        metadata_loader=_load_run_metadata,
     )
-
-
-def _annotate_checkpoint_progress(rows: pd.DataFrame) -> pd.DataFrame:
-    if rows.empty:
-        return rows.copy()
-    out = rows.sort_values(["dataset_name", "model_name", "batch_size", "run_id", "exp_min"]).reset_index(drop=True).copy()
-    group_cols = ["dataset_name", "model_name", "batch_size", "run_id"]
-    out["checkpoint_idx"] = out.groupby(group_cols).cumcount() + 1
-    checkpoint_count = out.groupby(group_cols)["checkpoint_idx"].transform("max")
-    out["checkpoint_progress_pct"] = np.where(
-        checkpoint_count <= 1,
-        100.0,
-        ((out["checkpoint_idx"] - 1) / (checkpoint_count - 1)) * 100.0,
-    )
-    return out
-
-
-def _rename_plot_columns(rows: pd.DataFrame, rename_map: dict[str, str]) -> pd.DataFrame:
-    out = rows.rename(columns=rename_map).copy()
-    sort_cols = [col for col in ("batch_size", "checkpoint_idx", "exp_min", "exp_min_mean") if col in out.columns]
-    return out.sort_values(sort_cols).reset_index(drop=True) if sort_cols else out.reset_index(drop=True)
 
 
 def _batch_styles(batch_sizes: list[int]) -> dict[int, tuple[Any, str]]:
-    cmap = plt.get_cmap("viridis")
-    colors = cmap(np.linspace(0.1, 0.95, max(1, len(batch_sizes))))
-    return {
-        batch_size: (colors[idx], MARKERS[idx % len(MARKERS)])
-        for idx, batch_size in enumerate(sorted(batch_sizes))
-    }
-
-
-def _ordered_model_names(model_names: list[str]) -> list[str]:
-    preferred = ["small", "resnet", "fttransformer"]
-    seen = set(model_names)
-    ordered = [name for name in preferred if name in seen]
-    ordered.extend(sorted(name for name in model_names if name not in preferred))
-    return ordered
-
-
-def _clip_ci_upper(y: np.ndarray, ci: np.ndarray, upper_bound: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
-    lower = y - ci
-    upper = np.minimum(y + ci, upper_bound)
-    return lower, upper
-
-
-def _clip_errorbar_upper(y: np.ndarray, ci: np.ndarray, upper_bound: float = 1.0) -> np.ndarray:
-    lower_err = ci
-    upper_err = np.maximum(0.0, np.minimum(ci, upper_bound - y))
-    return np.vstack([lower_err, upper_err])
-
-
-def _ci_bounds(y: np.ndarray, ci: np.ndarray, *, bounded: bool) -> tuple[np.ndarray, np.ndarray]:
-    if bounded:
-        return _clip_ci_upper(y, ci)
-    return y - ci, y + ci
-
-
-def _plot_line_with_band(
-    ax: plt.Axes,
-    *,
-    x: np.ndarray,
-    y: np.ndarray,
-    ci: np.ndarray,
-    color: Any,
-    marker: str,
-    linewidth: float,
-    markersize: float,
-    alpha: float,
-    label: str | None = None,
-    bounded: bool,
-) -> None:
-    lower, upper = _ci_bounds(y, ci, bounded=bounded)
-    ax.plot(x, y, color=color, marker=marker, linewidth=linewidth, markersize=markersize, label=label)
-    ax.fill_between(x, lower, upper, color=color, alpha=alpha, linewidth=0)
+    return shared_batch_styles(batch_sizes)
 
 
 def _plot_metric_vs_exposure(
@@ -431,8 +87,8 @@ def _plot_metric_vs_exposure(
             ci=sub[ci_col].to_numpy(dtype=float),
             color=color,
             marker=marker,
-            linewidth=2.0,
-            markersize=4.8,
+            linewidth=PLOT_LINEWIDTH,
+            markersize=PLOT_MARKERSIZE,
             alpha=0.16,
             label=str(batch_size),
             bounded=ylim == (0.0, BOUNDED_METRIC_YMAX),
@@ -444,70 +100,6 @@ def _plot_metric_vs_exposure(
         ylabel=ylabel,
         ylim=ylim,
     )
-
-
-def _draw_pareto_arrow(
-    ax: plt.Axes,
-    sub: pd.DataFrame,
-    *,
-    color: Any,
-    marker: str,
-    line_width: float,
-    start_size: float,
-    end_size: float,
-    mutation_scale: float,
-    label: str | None = None,
-) -> None:
-    start = sub.iloc[0]
-    end = sub.iloc[-1]
-    ax.annotate(
-        "",
-        xy=(float(end["utility_mean"]), float(end["tableak_acc_mean"])),
-        xytext=(float(start["utility_mean"]), float(start["tableak_acc_mean"])),
-        arrowprops={
-            "arrowstyle": "-|>",
-            "color": color,
-            "lw": line_width,
-            "shrinkA": 0,
-            "shrinkB": 0,
-            "mutation_scale": mutation_scale,
-            "alpha": 0.9,
-        },
-    )
-    ax.scatter(
-        [float(start["utility_mean"])],
-        [float(start["tableak_acc_mean"])],
-        facecolors="white",
-        edgecolors=color,
-        marker=marker,
-        s=start_size,
-        linewidths=1.2,
-        zorder=4,
-    )
-    ax.scatter(
-        [float(end["utility_mean"])],
-        [float(end["tableak_acc_mean"])],
-        color=color,
-        marker=marker,
-        s=end_size,
-        zorder=5,
-        label=label,
-    )
-
-
-def _errorbar_yerr(y: np.ndarray, ci: np.ndarray, *, bounded: bool) -> np.ndarray | np.ndarray:
-    if bounded:
-        return _clip_errorbar_upper(y, ci)
-    return ci
-
-
-def _apply_axis_finish(ax: plt.Axes, *, title: str, xlabel: str, ylabel: str, ylim: tuple[float, float] | None = None) -> None:
-    ax.set_title(title)
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    if ylim is not None:
-        ax.set_ylim(*ylim)
-    ax.grid(True, which="major")
 
 
 def _plot_attack_vs_exposure(plot_rows: pd.DataFrame, title: str) -> plt.Figure:
@@ -522,53 +114,7 @@ def _plot_attack_vs_exposure(plot_rows: pd.DataFrame, title: str) -> plt.Figure:
         ylim=(0.0, BOUNDED_METRIC_YMAX),
     )
     ax.set_title(title)
-    legend = ax.legend(title="Client Batch Size", ncol=2, frameon=True)
-    legend.get_frame().set_alpha(0.92)
-    return fig
-
-def _plot_pareto(plot_rows: pd.DataFrame, title: str) -> plt.Figure:
-    set_plot_paper_style()
-    fig, ax = plt.subplots(figsize=(7.2, 5.2))
-    styles = _batch_styles(plot_rows["batch_size"].astype(int).unique().tolist())
-    utility_metric = str(plot_rows["utility_metric"].iloc[0])
-
-    for batch_size in sorted(styles):
-        color, marker = styles[batch_size]
-        sub = plot_rows[plot_rows["batch_size"] == batch_size].sort_values("exp_min")
-        _draw_pareto_arrow(
-            ax,
-            sub,
-            color=color,
-            marker=marker,
-            line_width=2.2,
-            start_size=58,
-            end_size=62,
-            mutation_scale=11,
-            label=str(batch_size),
-        )
-
-    _apply_axis_finish(
-        ax,
-        title=title,
-        xlabel=clean_name(utility_metric, FL_METRIC_CLEAN_NAMES),
-        ylabel=ATTACK_METRIC_LABEL,
-        ylim=(0.0, BOUNDED_METRIC_YMAX),
-    )
-    xlim = fl_metric_limits(utility_metric, plot_rows["utility_mean"])
-    if xlim is not None:
-        ax.set_xlim(*xlim)
-    legend = ax.legend(title="Client Batch Size", ncol=2, frameon=True)
-    legend.get_frame().set_alpha(0.92)
-    ax.text(
-        0.02,
-        0.02,
-        "Open marker: 0% checkpoint   Filled marker: 100%",
-        transform=ax.transAxes,
-        ha="left",
-        va="bottom",
-        fontsize=8.5,
-        bbox={"boxstyle": "round,pad=0.22", "facecolor": "white", "alpha": 0.9, "edgecolor": "0.8"},
-    )
+    style_legend(ax.legend(title="Client Batch Size", ncol=2, frameon=True))
     return fig
 
 
@@ -593,8 +139,18 @@ def _plot_final_checkpoint_tradeoff(plot_rows: pd.DataFrame, title: str) -> plt.
             continue
         x = float(row["utility_mean"].iloc[0])
         y = float(row["tableak_acc_mean"].iloc[0])
-        ax.scatter(x, y, color=color, marker=marker, s=72, zorder=4)
-        ax.text(x, y, f" {batch_size}", color=color, fontsize=9, va="center", ha="left")
+        ax.scatter(
+            x,
+            y,
+            color=color,
+            marker=marker,
+            s=PLOT_SCATTER_SIZE,
+            edgecolors=PLOT_MARKER_EDGECOLOR,
+            linewidths=PLOT_MARKER_EDGEWIDTH,
+            zorder=PLOT_MARKER_ZORDER,
+            clip_on=False,
+            label=str(batch_size),
+        )
 
     _apply_axis_finish(
         ax,
@@ -606,6 +162,7 @@ def _plot_final_checkpoint_tradeoff(plot_rows: pd.DataFrame, title: str) -> plt.
     xlim = fl_metric_limits(utility_metric, plot_rows["utility_mean"])
     if xlim is not None:
         ax.set_xlim(*xlim)
+    style_legend(ax.legend(title="Client Batch Size", ncol=2, frameon=True))
     ax.text(
         0.02,
         0.02,
@@ -657,8 +214,7 @@ def _plot_checkpoint_summary_on_axes(
         .drop_duplicates()
         .sort_values("checkpoint_idx")
     )
-    cmap = plt.get_cmap("cividis")
-    colors = cmap(np.linspace(0.15, 0.9, max(1, len(checkpoints))))
+    colors = sample_checkpoint_colors(len(checkpoints))
 
     x_labels = sorted(rows["batch_size"].astype(int).unique().tolist())
     x_lookup = {batch_size: idx for idx, batch_size in enumerate(x_labels)}
@@ -675,12 +231,16 @@ def _plot_checkpoint_summary_on_axes(
             x,
             y,
             yerr=yerr,
-            fmt=f"{MARKERS[idx % len(MARKERS)]}-",
+            fmt=f"{PLOT_MARKERS[idx % len(PLOT_MARKERS)]}--",
             color=colors[idx],
-            linewidth=1.9,
-            markersize=5.0,
+            linewidth=PLOT_LINEWIDTH,
+            markersize=PLOT_MARKERSIZE,
+            markeredgecolor=PLOT_MARKER_EDGECOLOR,
+            markeredgewidth=PLOT_MARKER_EDGEWIDTH,
             capsize=3.0,
             label=f"Checkpoint {int(round(progress))}%",
+            zorder=PLOT_MARKER_ZORDER,
+            clip_on=False,
         )
 
     ax.set_xticks(np.arange(len(x_labels), dtype=float))
@@ -692,14 +252,13 @@ def _plot_checkpoint_summary_on_axes(
         ylabel=ylabel,
         ylim=ylim,
     )
-    legend = ax.legend(title="Attack Checkpoint (% FL Training)", ncol=2, frameon=True)
-    legend.get_frame().set_alpha(0.92)
+    style_legend(ax.legend(title="Attack Checkpoint (% FL Training)", ncol=2, frameon=True))
 
 
 def _plot_panel(
     attack_plot: pd.DataFrame,
     utility_plot: pd.DataFrame,
-    pareto_plot: pd.DataFrame,
+    tradeoff_plot: pd.DataFrame,
     attack_checkpoint_plot: pd.DataFrame,
     panel_title: str,
 ) -> plt.Figure:
@@ -708,6 +267,13 @@ def _plot_panel(
     styles = _batch_styles(attack_plot["batch_size"].astype(int).unique().tolist())
     utility_metric = str(utility_plot["utility_metric"].iloc[0])
     utility_ylim = fl_metric_limits(utility_metric, utility_plot["utility_mean"])
+    final_rows = (
+        tradeoff_plot.sort_values(["batch_size", "exp_min"])
+        .groupby("batch_size", as_index=False)
+        .tail(1)
+        .sort_values("batch_size")
+        .reset_index(drop=True)
+    )
 
     for batch_size in sorted(styles):
         color, marker = styles[batch_size]
@@ -720,8 +286,8 @@ def _plot_panel(
             ci=attack_sub["tableak_acc_ci95"].to_numpy(dtype=float),
             color=color,
             marker=marker,
-            linewidth=1.8,
-            markersize=4.3,
+            linewidth=PLOT_LINEWIDTH,
+            markersize=PLOT_MARKERSIZE,
             alpha=0.14,
             label=str(batch_size),
             bounded=True,
@@ -734,25 +300,29 @@ def _plot_panel(
             title="",
             value_col="utility_mean",
             ci_col="utility_ci95",
-            linewidth=1.8,
-            markersize=4.3,
+            linewidth=PLOT_LINEWIDTH,
+            markersize=PLOT_MARKERSIZE,
             alpha=0.14,
             styles={batch_size: (color, marker)},
             show_legend_labels=False,
             ylim=utility_ylim,
         )
 
-        pareto_sub = pareto_plot[pareto_plot["batch_size"] == batch_size].sort_values("exp_min")
-        _draw_pareto_arrow(
-            axes[1, 0],
-            pareto_sub,
-            color=color,
-            marker=marker,
-            line_width=1.9,
-            start_size=34,
-            end_size=36,
-            mutation_scale=10,
-        )
+        row = final_rows[final_rows["batch_size"] == batch_size]
+        if not row.empty:
+            x = float(row["utility_mean"].iloc[0])
+            y = float(row["tableak_acc_mean"].iloc[0])
+            axes[1, 0].scatter(
+                x,
+                y,
+                color=color,
+                marker=marker,
+                s=PLOT_SCATTER_SIZE,
+                edgecolors=PLOT_MARKER_EDGECOLOR,
+                linewidths=PLOT_MARKER_EDGEWIDTH,
+                zorder=PLOT_MARKER_ZORDER,
+                clip_on=False,
+            )
 
     _plot_checkpoint_summary_on_axes(
         ax=axes[1, 1],
@@ -760,7 +330,7 @@ def _plot_panel(
         value_col="tableak_acc_mean",
         ci_col="tableak_acc_ci95",
         ylabel=ATTACK_METRIC_LABEL,
-        title="D. Attack vs Batch Size at Attack Checkpoints",
+        title="D. Attack vs Client Batch Size at Attack Checkpoints",
         ylim=(0.0, BOUNDED_METRIC_YMAX),
     )
 
@@ -780,16 +350,15 @@ def _plot_panel(
     )
     _apply_axis_finish(
         axes[1, 0],
-        title="C. Privacy-Utility Pareto",
+        title="C. Final Privacy-Utility Trade-off",
         xlabel=clean_name(utility_metric, FL_METRIC_CLEAN_NAMES),
         ylabel=ATTACK_METRIC_LABEL,
         ylim=(0.0, BOUNDED_METRIC_YMAX),
     )
-    xlim = fl_metric_limits(utility_metric, pareto_plot["utility_mean"])
+    xlim = fl_metric_limits(utility_metric, tradeoff_plot["utility_mean"])
     if xlim is not None:
         axes[1, 0].set_xlim(*xlim)
-    legend = axes[0, 0].legend(title="Batch Size", ncol=3, frameon=True, loc="lower right")
-    legend.get_frame().set_alpha(0.92)
+    style_legend(axes[0, 0].legend(title="Client Batch Size", ncol=3, frameon=True, loc="lower right"))
     fig.suptitle(panel_title, y=1.01)
     fig.tight_layout()
     return fig
@@ -820,8 +389,8 @@ def _plot_cross_model_attack_vs_exposure(
                 ci=sub["tableak_acc_ci95"].to_numpy(dtype=float),
                 color=color,
                 marker=marker,
-                linewidth=1.8,
-                markersize=4.2,
+                linewidth=PLOT_LINEWIDTH,
+                markersize=PLOT_MARKERSIZE,
                 alpha=0.14,
                 label=str(batch_size),
                 bounded=True,
@@ -834,11 +403,10 @@ def _plot_cross_model_attack_vs_exposure(
             ylim=(0.0, BOUNDED_METRIC_YMAX),
         )
 
-    legend = axes_array[0].legend(title="Client Batch Size", ncol=2, frameon=True, loc="lower right")
-    legend.get_frame().set_alpha(0.92)
+    style_legend(axes_array[0].legend(title="Client Batch Size", ncol=2, frameon=True, loc="lower right"))
     fig.suptitle(
         f"{protocol_clean_name}: {ATTACK_METRIC_LABEL} Across Models ({dataset_clean_name}, {task_clean_name})",
-        y=1.02,
+        y=1.01,
     )
     fig.tight_layout()
     return fig
@@ -854,10 +422,11 @@ def _plot_model_batch_attack_metrics(
     set_plot_paper_style()
     model_names = _ordered_model_names(dataset_attack["model_name"].astype(str).unique().tolist())
     batch_sizes = sorted(dataset_attack["batch_size"].astype(int).unique().tolist())
+    metric_colors = sample_group_colors(3)
     metric_specs = [
-        ("tableak_acc_mean", "tableak_acc_ci95", ATTACK_METRIC_LABEL, "tab:blue", "o"),
-        ("num_acc_mean", "num_acc_ci95", "Numerical Accuracy", "tab:orange", "s"),
-        ("cat_acc_mean", "cat_acc_ci95", "Categorical Accuracy", "tab:green", "^"),
+        ("tableak_acc_mean", "tableak_acc_ci95", ATTACK_METRIC_LABEL, metric_colors[0], "o"),
+        ("num_acc_mean", "num_acc_ci95", "Numerical Accuracy", metric_colors[1], "s"),
+        ("cat_acc_mean", "cat_acc_ci95", "Categorical Accuracy", metric_colors[2], "^"),
     ]
     fig, axes = plt.subplots(
         len(model_names),
@@ -891,8 +460,8 @@ def _plot_model_batch_attack_metrics(
                     ci=sub[ci_col].fillna(0.0).to_numpy(dtype=float),
                     color=color,
                     marker=marker,
-                    linewidth=1.6,
-                    markersize=3.6,
+                    linewidth=PLOT_LINEWIDTH,
+                    markersize=PLOT_MARKERSIZE,
                     alpha=0.12,
                     label=metric_label if row_idx == 0 and col_idx == 0 else None,
                     bounded=True,
@@ -904,10 +473,16 @@ def _plot_model_batch_attack_metrics(
                     prior_sub["exp_min"].to_numpy(dtype=float),
                     prior_sub["prior_tableak_acc_mean"].to_numpy(dtype=float),
                     color="0.25",
+                    marker="P",
                     linestyle="--",
-                    linewidth=1.2,
+                    linewidth=PLOT_LINEWIDTH,
+                    markersize=PLOT_MARKERSIZE,
+                    markeredgecolor=PLOT_MARKER_EDGECOLOR,
+                    markeredgewidth=PLOT_MARKER_EDGEWIDTH,
                     alpha=0.95,
                     label="Client Prior Baseline" if row_idx == 0 and col_idx == 0 else None,
+                    zorder=PLOT_MARKER_ZORDER,
+                    clip_on=False,
                 )
             random_sub = cell_rows.dropna(subset=["random_tableak_acc_mean"]).sort_values("exp_min")
             if not random_sub.empty:
@@ -915,15 +490,21 @@ def _plot_model_batch_attack_metrics(
                     random_sub["exp_min"].to_numpy(dtype=float),
                     random_sub["random_tableak_acc_mean"].to_numpy(dtype=float),
                     color="0.45",
-                    linestyle=":",
-                    linewidth=1.3,
+                    marker="X",
+                    linestyle="--",
+                    linewidth=PLOT_LINEWIDTH,
+                    markersize=PLOT_MARKERSIZE,
+                    markeredgecolor=PLOT_MARKER_EDGECOLOR,
+                    markeredgewidth=PLOT_MARKER_EDGEWIDTH,
                     alpha=0.95,
                     label="Uniform Random Baseline" if row_idx == 0 and col_idx == 0 else None,
+                    zorder=PLOT_MARKER_ZORDER,
+                    clip_on=False,
                 )
             if row_idx == 0 and col_idx == 0:
                 legend_handles, legend_labels = ax.get_legend_handles_labels()
 
-            title = f"Batch {batch_size}" if row_idx == 0 else ""
+            title = f"Client Batch Size {batch_size}" if row_idx == 0 else ""
             y_label = clean_name(model_name, MODEL_CLEAN_NAMES) if col_idx == 0 else ""
             _apply_axis_finish(
                 ax,
@@ -934,32 +515,25 @@ def _plot_model_batch_attack_metrics(
             )
 
     if legend_handles:
-        fig.legend(
-            legend_handles,
-            legend_labels,
-            loc="upper center",
-            ncol=len(legend_handles),
-            frameon=True,
-            bbox_to_anchor=(0.5, 0.995),
+        display_order = [0, 3, 1, 4, 2]
+        ordered_handles = [legend_handles[idx] for idx in display_order if idx < len(legend_handles)]
+        ordered_labels = [legend_labels[idx] for idx in display_order if idx < len(legend_labels)]
+        style_legend(
+            fig.legend(
+                ordered_handles,
+                ordered_labels,
+                loc="upper center",
+                ncol=3,
+                frameon=True,
+                bbox_to_anchor=(0.5, 0.997),
+            )
         )
     fig.suptitle(
-        f"{protocol_clean_name}: Attack Metrics Across Models and Batch Sizes ({dataset_clean_name}, {task_clean_name})",
-        y=1.03,
+        f"{protocol_clean_name}: Attack Metrics Across Models and Client Batch Sizes ({dataset_clean_name}, {task_clean_name})",
+        y=1.01,
     )
     fig.tight_layout()
     return fig
-
-
-def _sanitize_for_filename(value: str) -> str:
-    safe = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in value.strip())
-    return safe or "unknown"
-
-
-def _save_figure(fig: plt.Figure, base_path: Path) -> None:
-    fig.savefig(base_path.with_suffix(".png"), dpi=300)
-    fig.savefig(base_path.with_suffix(".pdf"))
-    plt.close(fig)
-
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -1016,20 +590,12 @@ def main() -> None:
     )
 
     plots_dir = experiment_dir / "plots"
-    image_dir = plots_dir / "image"
-    pdf_dir = plots_dir / "pdf"
-    data_dir = plots_dir / "data"
-    image_singles_dir = image_dir / "singles"
-    image_panels_dir = image_dir / "panels"
-    pdf_singles_dir = pdf_dir / "singles"
-    pdf_panels_dir = pdf_dir / "panels"
-    image_dir.mkdir(parents=True, exist_ok=True)
-    pdf_dir.mkdir(parents=True, exist_ok=True)
-    data_dir.mkdir(parents=True, exist_ok=True)
-    image_singles_dir.mkdir(parents=True, exist_ok=True)
-    image_panels_dir.mkdir(parents=True, exist_ok=True)
-    pdf_singles_dir.mkdir(parents=True, exist_ok=True)
-    pdf_panels_dir.mkdir(parents=True, exist_ok=True)
+    plot_dirs = prepare_plot_dirs(plots_dir)
+    data_dir = plot_dirs["data"]
+    image_singles_dir = plot_dirs["image_singles"]
+    image_panels_dir = plot_dirs["image_panels"]
+    pdf_singles_dir = plot_dirs["pdf_singles"]
+    pdf_panels_dir = plot_dirs["pdf_panels"]
 
     dataset_names = sorted(attack_plot["dataset_name"].astype(str).unique().tolist())
     for dataset_name in dataset_names:
@@ -1047,43 +613,36 @@ def main() -> None:
         dataset_clean_name = clean_name(dataset_name, DATASET_CLEAN_NAMES)
         task_clean_name = clean_name(str(dataset_attack["task_objective"].iloc[0]), TASK_CLEAN_NAMES)
 
-        cross_model_attack_base = plots_dir / (
-            f"fedsgd_batch_sizes_cross_model_attack_vs_exposure__dataset_{dataset_suffix}"
-        )
-        model_batch_attack_metrics_base = plots_dir / (
-            f"fedsgd_batch_sizes_model_batch_attack_metrics__dataset_{dataset_suffix}"
-        )
+        cross_model_attack_base = f"fedsgd_batch_sizes_cross_model_attack_vs_exposure__dataset_{dataset_suffix}"
+        model_batch_attack_metrics_base = f"fedsgd_batch_sizes_model_batch_attack_metrics__dataset_{dataset_suffix}"
 
-        _save_figure(
+        cross_png, cross_pdf = _save_figure(
             _plot_cross_model_attack_vs_exposure(
                 dataset_attack,
                 protocol_clean_name=protocol_clean_name,
                 dataset_clean_name=dataset_clean_name,
                 task_clean_name=task_clean_name,
             ),
-            image_panels_dir / cross_model_attack_base.name,
+            image_panels_dir / cross_model_attack_base,
+            pdf_base_path=pdf_panels_dir / cross_model_attack_base,
         )
-        _save_figure(
+        metrics_png, metrics_pdf = _save_figure(
             _plot_model_batch_attack_metrics(
                 dataset_attack,
                 protocol_clean_name=protocol_clean_name,
                 dataset_clean_name=dataset_clean_name,
                 task_clean_name=task_clean_name,
             ),
-            image_panels_dir / model_batch_attack_metrics_base.name,
+            image_panels_dir / model_batch_attack_metrics_base,
+            pdf_base_path=pdf_panels_dir / model_batch_attack_metrics_base,
         )
+        print(cross_png)
+        print(cross_pdf)
+        print(metrics_png)
+        print(metrics_pdf)
 
-        for base_name in [cross_model_attack_base.name, model_batch_attack_metrics_base.name]:
-            src_png = image_panels_dir / f"{base_name}.png"
-            src_pdf = image_panels_dir / f"{base_name}.pdf"
-            dst_pdf = pdf_panels_dir / f"{base_name}.pdf"
-            if src_pdf.exists():
-                src_pdf.replace(dst_pdf)
-            print(src_png)
-            print(dst_pdf)
-
-        dataset_attack.to_csv(data_dir / f"{cross_model_attack_base.name}_data.csv", index=False)
-        dataset_attack.to_csv(data_dir / f"{model_batch_attack_metrics_base.name}_data.csv", index=False)
+        dataset_attack.to_csv(data_dir / f"{cross_model_attack_base}_data.csv", index=False)
+        dataset_attack.to_csv(data_dir / f"{model_batch_attack_metrics_base}_data.csv", index=False)
 
         model_names = sorted(dataset_attack["model_name"].astype(str).unique().tolist())
         for model_name in model_names:
@@ -1108,11 +667,11 @@ def main() -> None:
             utility_label = clean_name(utility_metric, FL_METRIC_CLEAN_NAMES)
 
             attack_title = (
-                f"{protocol_clean_name}: {ATTACK_METRIC_LABEL} Across Batch Sizes "
+                f"{protocol_clean_name}: {ATTACK_METRIC_LABEL} Across Client Batch Sizes "
                 f"({model_clean_name}, {dataset_clean_name}, {task_clean_name})"
             )
             utility_title = (
-                f"{protocol_clean_name}: {utility_label} Across Batch Sizes "
+                f"{protocol_clean_name}: {utility_label} Across Client Batch Sizes "
                 f"({model_clean_name}, {dataset_clean_name}, {task_clean_name})"
             )
             final_test_metric = (
@@ -1126,7 +685,7 @@ def main() -> None:
                 f"({model_clean_name}, {dataset_clean_name}, {task_clean_name})"
             )
             pareto_title = (
-                f"{protocol_clean_name}: Privacy-Utility Trade-off Across Batch Sizes "
+                f"{protocol_clean_name}: Privacy-Utility Trade-off Across Client Batch Sizes "
                 f"({model_clean_name}, {dataset_clean_name})"
             )
             final_checkpoint_tradeoff_title = (
@@ -1134,7 +693,7 @@ def main() -> None:
                 f"({model_clean_name}, {dataset_clean_name})"
             )
             attack_summary_title = (
-                f"{protocol_clean_name}: Attack Success by Batch Size at Attack Checkpoints "
+                f"{protocol_clean_name}: Attack Success by Client Batch Size at Attack Checkpoints "
                 f"({model_clean_name}, {dataset_clean_name})"
             )
             utility_summary_title = (
@@ -1146,102 +705,100 @@ def main() -> None:
                 f"({model_clean_name}, {dataset_clean_name}, {task_clean_name})"
             )
 
-            attack_base = plots_dir / (
-                f"fedsgd_batch_sizes_attack_vs_exposure__model_{model_suffix}__dataset_{dataset_suffix}"
-            )
-            utility_base = plots_dir / (
-                f"fedsgd_batch_sizes_utility_vs_exposure__model_{model_suffix}__dataset_{dataset_suffix}"
-            )
-            final_test_base = plots_dir / (
-                f"fedsgd_batch_sizes_final_test_utility_vs_exposure__model_{model_suffix}__dataset_{dataset_suffix}"
-            )
-            pareto_base = plots_dir / (
-                f"fedsgd_batch_sizes_pareto__model_{model_suffix}__dataset_{dataset_suffix}"
-            )
-            final_checkpoint_tradeoff_base = plots_dir / (
+            attack_base = f"fedsgd_batch_sizes_attack_vs_exposure__model_{model_suffix}__dataset_{dataset_suffix}"
+            utility_base = f"fedsgd_batch_sizes_utility_vs_exposure__model_{model_suffix}__dataset_{dataset_suffix}"
+            final_test_base = f"fedsgd_batch_sizes_final_test_utility_vs_exposure__model_{model_suffix}__dataset_{dataset_suffix}"
+            final_checkpoint_tradeoff_base = (
                 f"fedsgd_batch_sizes_final_checkpoint_tradeoff__model_{model_suffix}__dataset_{dataset_suffix}"
             )
-            attack_summary_base = plots_dir / (
+            attack_summary_base = (
                 f"fedsgd_batch_sizes_attack_by_batch_at_checkpoints__model_{model_suffix}__dataset_{dataset_suffix}"
             )
-            utility_summary_base = plots_dir / (
+            utility_summary_base = (
                 f"fedsgd_batch_sizes_utility_by_batch_at_checkpoints__model_{model_suffix}__dataset_{dataset_suffix}"
             )
-            panel_base = plots_dir / (
-                f"fedsgd_batch_sizes_panel__model_{model_suffix}__dataset_{dataset_suffix}"
-            )
+            panel_base = f"fedsgd_batch_sizes_panel__model_{model_suffix}__dataset_{dataset_suffix}"
 
-            _save_figure(_plot_attack_vs_exposure(attack_slice, attack_title), image_singles_dir / attack_base.name)
-            _save_figure(plot_fl_metric_vs_exposure(utility_slice, utility_title), image_singles_dir / utility_base.name)
+            output_paths: list[tuple[Path, Path]] = []
+
+            output_paths.append(
+                _save_figure(
+                    _plot_attack_vs_exposure(attack_slice, attack_title),
+                    image_singles_dir / attack_base,
+                    pdf_base_path=pdf_singles_dir / attack_base,
+                )
+            )
+            output_paths.append(
+                _save_figure(
+                    plot_fl_metric_vs_exposure(utility_slice, utility_title),
+                    image_singles_dir / utility_base,
+                    pdf_base_path=pdf_singles_dir / utility_base,
+                )
+            )
             if not final_test_slice.empty:
-                _save_figure(plot_fl_metric_vs_exposure(final_test_slice, final_test_title), image_singles_dir / final_test_base.name)
-            _save_figure(_plot_pareto(pareto_slice, pareto_title), image_singles_dir / pareto_base.name)
-            _save_figure(
-                _plot_final_checkpoint_tradeoff(pareto_slice, final_checkpoint_tradeoff_title),
-                image_singles_dir / final_checkpoint_tradeoff_base.name,
+                output_paths.append(
+                    _save_figure(
+                        plot_fl_metric_vs_exposure(final_test_slice, final_test_title),
+                        image_singles_dir / final_test_base,
+                        pdf_base_path=pdf_singles_dir / final_test_base,
+                    )
+                )
+            output_paths.append(
+                _save_figure(
+                    _plot_final_checkpoint_tradeoff(pareto_slice, final_checkpoint_tradeoff_title),
+                    image_singles_dir / final_checkpoint_tradeoff_base,
+                    pdf_base_path=pdf_singles_dir / final_checkpoint_tradeoff_base,
+                )
             )
-            _save_figure(
-                _plot_checkpoint_summary(
-                    attack_checkpoint_slice,
-                    value_col="tableak_acc_mean",
-                    ci_col="tableak_acc_ci95",
-                    ylabel=ATTACK_METRIC_LABEL,
-                    title=attack_summary_title,
-                    ylim=(0.0, BOUNDED_METRIC_YMAX),
-                ),
-                image_singles_dir / attack_summary_base.name,
+            output_paths.append(
+                _save_figure(
+                    _plot_checkpoint_summary(
+                        attack_checkpoint_slice,
+                        value_col="tableak_acc_mean",
+                        ci_col="tableak_acc_ci95",
+                        ylabel=ATTACK_METRIC_LABEL,
+                        title=attack_summary_title,
+                        ylim=(0.0, BOUNDED_METRIC_YMAX),
+                    ),
+                    image_singles_dir / attack_summary_base,
+                    pdf_base_path=pdf_singles_dir / attack_summary_base,
+                )
             )
-            _save_figure(
-                _plot_checkpoint_summary(
-                    utility_checkpoint_slice,
-                    value_col="utility_mean",
-                    ci_col="utility_ci95",
-                    ylabel=utility_label,
-                    title=utility_summary_title,
-                    ylim=fl_metric_limits(utility_metric, utility_checkpoint_slice["utility_mean"]),
-                ),
-                image_singles_dir / utility_summary_base.name,
+            output_paths.append(
+                _save_figure(
+                    _plot_checkpoint_summary(
+                        utility_checkpoint_slice,
+                        value_col="utility_mean",
+                        ci_col="utility_ci95",
+                        ylabel=utility_label,
+                        title=utility_summary_title,
+                        ylim=fl_metric_limits(utility_metric, utility_checkpoint_slice["utility_mean"]),
+                    ),
+                    image_singles_dir / utility_summary_base,
+                    pdf_base_path=pdf_singles_dir / utility_summary_base,
+                )
             )
-            _save_figure(
-                _plot_panel(
-                    attack_slice,
-                    utility_slice,
-                    pareto_slice,
-                    attack_checkpoint_slice,
-                    panel_title,
-                ),
-                image_panels_dir / panel_base.name,
+            output_paths.append(
+                _save_figure(
+                    _plot_panel(
+                        attack_slice,
+                        utility_slice,
+                        pareto_slice,
+                        attack_checkpoint_slice,
+                        panel_title,
+                    ),
+                    image_panels_dir / panel_base,
+                    pdf_base_path=pdf_panels_dir / panel_base,
+                )
             )
+            for png_path, pdf_path in output_paths:
+                print(png_path)
+                print(pdf_path)
 
-            output_base_names = [
-                attack_base.name,
-                utility_base.name,
-                pareto_base.name,
-                final_checkpoint_tradeoff_base.name,
-                attack_summary_base.name,
-                utility_summary_base.name,
-                panel_base.name,
-            ]
+            attack_slice.to_csv(data_dir / f"{attack_base}_data.csv", index=False)
+            utility_slice.to_csv(data_dir / f"{utility_base}_data.csv", index=False)
             if not final_test_slice.empty:
-                output_base_names.insert(2, final_test_base.name)
-
-            for base_name in output_base_names:
-                is_panel = base_name == panel_base.name
-                src_root = image_panels_dir if is_panel else image_singles_dir
-                dst_root = pdf_panels_dir if is_panel else pdf_singles_dir
-                src_png = src_root / f"{base_name}.png"
-                src_pdf = src_root / f"{base_name}.pdf"
-                dst_pdf = dst_root / f"{base_name}.pdf"
-                if src_pdf.exists():
-                    src_pdf.replace(dst_pdf)
-                print(src_png)
-                print(dst_pdf)
-
-            attack_slice.to_csv(data_dir / f"{attack_base.name}_data.csv", index=False)
-            utility_slice.to_csv(data_dir / f"{utility_base.name}_data.csv", index=False)
-            if not final_test_slice.empty:
-                final_test_slice.to_csv(data_dir / f"{final_test_base.name}_data.csv", index=False)
-            pareto_slice.to_csv(data_dir / f"{pareto_base.name}_data.csv", index=False)
+                final_test_slice.to_csv(data_dir / f"{final_test_base}_data.csv", index=False)
             final_rows = (
                 pareto_slice.sort_values(["batch_size", "exp_min"])
                 .groupby("batch_size", as_index=False)
@@ -1249,9 +806,9 @@ def main() -> None:
                 .sort_values("batch_size")
                 .reset_index(drop=True)
             )
-            final_rows.to_csv(data_dir / f"{final_checkpoint_tradeoff_base.name}_data.csv", index=False)
-            attack_checkpoint_slice.to_csv(data_dir / f"{attack_summary_base.name}_data.csv", index=False)
-            utility_checkpoint_slice.to_csv(data_dir / f"{utility_summary_base.name}_data.csv", index=False)
+            final_rows.to_csv(data_dir / f"{final_checkpoint_tradeoff_base}_data.csv", index=False)
+            attack_checkpoint_slice.to_csv(data_dir / f"{attack_summary_base}_data.csv", index=False)
+            utility_checkpoint_slice.to_csv(data_dir / f"{utility_summary_base}_data.csv", index=False)
 
 
 if __name__ == "__main__":
