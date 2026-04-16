@@ -11,10 +11,14 @@ from matplotlib.lines import Line2D
 
 from plot_helper import (
     ATTACK_METRIC_LABEL,
+    BASELINE_LINESTYLE,
+    BASELINE_PRIOR_COLOR,
+    BASELINE_RANDOM_COLOR,
     DATASET_CLEAN_NAMES,
     DEFAULT_BOUNDED_METRIC_YMAX,
     DEFAULT_Y_BY_TASK,
     FL_METRIC_CLEAN_NAMES,
+    PAUL_TOL_MUTED_8,
     PLOT_MARKER_EDGECOLOR,
     PLOT_MARKER_EDGEWIDTH,
     PLOT_LINEWIDTH,
@@ -37,7 +41,6 @@ from plot_helper import (
     resolve_experiment_dir,
     sanitize_for_filename,
     save_figure,
-    sample_group_colors,
     set_plot_paper_style,
     errorbar_yerr,
     plot_line_with_band,
@@ -342,7 +345,11 @@ def _ordered_curve_combinations() -> list[tuple[str, str, float]]:
 
 def _curve_colors() -> dict[tuple[str, str, float], Any]:
     combos = _ordered_curve_combinations()
-    colors = sample_group_colors(len(combos))
+    if len(combos) > len(PAUL_TOL_MUTED_8):
+        raise ValueError(
+            f"Torch-modules plotting expects at most {len(PAUL_TOL_MUTED_8)} combinations, got {len(combos)}."
+        )
+    colors = PAUL_TOL_MUTED_8[: len(combos)]
     return {combo: colors[idx] for idx, combo in enumerate(combos)}
 
 
@@ -606,7 +613,7 @@ def _plot_batch_split_metric_grid(
                             baseline_rows = curve_rows.dropna(subset=[baseline_col]).copy()
                             if baseline_rows.empty:
                                 continue
-                            baseline_color = "0.25" if "prior_" in baseline_col else "0.45"
+                            baseline_color = BASELINE_PRIOR_COLOR if "prior_" in baseline_col else BASELINE_RANDOM_COLOR
                             baseline_marker = "P" if "prior_" in baseline_col else "X"
                             ax.plot(
                                 baseline_rows["exp_min"].to_numpy(dtype=float),
@@ -666,23 +673,23 @@ def _plot_batch_split_metric_grid(
     if baseline_specs:
         legend_handles.extend(
             [
-                Line2D(
-                    [0],
-                    [0],
-                    color="0.25",
-                    linestyle="--",
-                    linewidth=PLOT_LINEWIDTH,
-                    marker="P",
-                    markersize=PLOT_MARKERSIZE,
+                    Line2D(
+                        [0],
+                        [0],
+                        color=BASELINE_PRIOR_COLOR,
+                        linestyle=BASELINE_LINESTYLE,
+                        linewidth=PLOT_LINEWIDTH,
+                        marker="P",
+                        markersize=PLOT_MARKERSIZE,
                 ),
-                Line2D(
-                    [0],
-                    [0],
-                    color="0.45",
-                    linestyle="--",
-                    linewidth=PLOT_LINEWIDTH,
-                    marker="X",
-                    markersize=PLOT_MARKERSIZE,
+                    Line2D(
+                        [0],
+                        [0],
+                        color=BASELINE_RANDOM_COLOR,
+                        linestyle=BASELINE_LINESTYLE,
+                        linewidth=PLOT_LINEWIDTH,
+                        marker="X",
+                        markersize=PLOT_MARKERSIZE,
                 ),
             ]
         )
@@ -814,8 +821,8 @@ def main() -> None:
                 title_metric_name=ATTACK_METRIC_LABEL,
                 tighten_figure_ylim=False,
                 baseline_specs=[
-                    ("prior_tableak_acc", "--"),
-                    ("random_tableak_acc", "--"),
+                    ("prior_tableak_acc", BASELINE_LINESTYLE),
+                    ("random_tableak_acc", BASELINE_LINESTYLE),
                 ],
                 top_rect=0.96,
             )
@@ -844,8 +851,8 @@ def main() -> None:
                 title_metric_name="Numerical Accuracy",
                 tighten_figure_ylim=False,
                 baseline_specs=[
-                    ("prior_num_acc", "--"),
-                    ("random_num_acc", "--"),
+                    ("prior_num_acc", BASELINE_LINESTYLE),
+                    ("random_num_acc", BASELINE_LINESTYLE),
                 ],
                 top_rect=0.96,
             )
@@ -874,8 +881,8 @@ def main() -> None:
                 title_metric_name="Categorical Accuracy",
                 tighten_figure_ylim=False,
                 baseline_specs=[
-                    ("prior_cat_acc", "--"),
-                    ("random_cat_acc", "--"),
+                    ("prior_cat_acc", BASELINE_LINESTYLE),
+                    ("random_cat_acc", BASELINE_LINESTYLE),
                 ],
                 top_rect=0.96,
             )

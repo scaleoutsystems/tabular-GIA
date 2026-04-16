@@ -11,6 +11,9 @@ from plot_fl_training import (
 )
 from plot_helper import (
     ATTACK_METRIC_LABEL,
+    BASELINE_LINESTYLE,
+    BASELINE_PRIOR_COLOR,
+    BASELINE_RANDOM_COLOR,
     DATASET_CLEAN_NAMES,
     FL_METRIC_CLEAN_NAMES,
     MODEL_CLEAN_NAMES,
@@ -472,9 +475,9 @@ def _plot_model_batch_attack_metrics(
                 ax.plot(
                     prior_sub["exp_min"].to_numpy(dtype=float),
                     prior_sub["prior_tableak_acc_mean"].to_numpy(dtype=float),
-                    color="0.25",
+                    color=BASELINE_PRIOR_COLOR,
                     marker="P",
-                    linestyle="--",
+                    linestyle=BASELINE_LINESTYLE,
                     linewidth=PLOT_LINEWIDTH,
                     markersize=PLOT_MARKERSIZE,
                     markeredgecolor=PLOT_MARKER_EDGECOLOR,
@@ -489,9 +492,9 @@ def _plot_model_batch_attack_metrics(
                 ax.plot(
                     random_sub["exp_min"].to_numpy(dtype=float),
                     random_sub["random_tableak_acc_mean"].to_numpy(dtype=float),
-                    color="0.45",
+                    color=BASELINE_RANDOM_COLOR,
                     marker="X",
-                    linestyle="--",
+                    linestyle=BASELINE_LINESTYLE,
                     linewidth=PLOT_LINEWIDTH,
                     markersize=PLOT_MARKERSIZE,
                     markeredgecolor=PLOT_MARKER_EDGECOLOR,
