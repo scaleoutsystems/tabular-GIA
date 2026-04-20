@@ -40,14 +40,18 @@ def build_sweep_cfg() -> dict[str, Any]:
                     "data/binary/adult/adult.csv",
                     "data/binary/adult/adult.yaml",
                 ],
-                #[
-                #    "data/multiclass/pandemic_movement_office/pandemic_movement_office.csv",
-                #    "data/multiclass/pandemic_movement_office/pandemic_movement_office.yaml",
-                #],
-                #[
-                #    "data/regression/california_housing/california_housing.csv",
-                #    "data/regression/california_housing/california_housing.yaml",
-                #],
+                [
+                    "data/multiclass/pandemic_movement_office/pandemic_movement_office.csv",
+                    "data/multiclass/pandemic_movement_office/pandemic_movement_office.yaml",
+                ],
+                [
+                    "data/regression/california_housing/california_housing.csv",
+                    "data/regression/california_housing/california_housing.yaml",
+                ],
+                [
+                    "data/binary/mimic_admission_tier3_binary/mimic_admission_tier3_binary.train.csv",
+                    "data/binary/mimic_admission_tier3_binary/mimic_admission_tier3_binary.yaml",
+                ],
             ],
             "batch_size": [8,32]
         },
@@ -127,7 +131,7 @@ def build_sweep_cfg() -> dict[str, Any]:
         "default": {
             "attack_mode": "fixed_batch",
             "fixed_batch_k": 1,
-            "attack_schedule": "exposure",
+            "attack_schedule": "auto",
             "auto_checkpoints": 5,
             "attack_exposure_milestones": [0.0, 1.0, 5.0, 10.0, 25.0],
             "vectorized_attacks": True,
@@ -141,6 +145,8 @@ def build_sweep_cfg() -> dict[str, Any]:
         "grid": {
             # Nested key sweep example:
             # "invertingconfig": {"at_iterations": [100, 500, 1000]},
+            "attack_schedule": "exposure",
+            "attack_exposure_milestones": [[0.0, 1.0, 5.0, 10.0, 25.0]],
         },
     }
 

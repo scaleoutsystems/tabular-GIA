@@ -37,8 +37,8 @@ def build_sweep_cfg() -> dict[str, Any]:
         "grid": {
             "dataset_path_and_meta_path": [
                 [
-                    "data/binary/mimic/mimic.csv",
-                    "data/binary/mimic/mimic.yaml",
+                    "data/binary/mimic_admission_tier3_binary/mimic_admission_tier3_binary.train.csv",
+                    "data/binary/mimic_admission_tier3_binary/mimic_admission_tier3_binary.yaml",
                 ],
             ],
             "batch_size": [16,32,64],
@@ -84,7 +84,7 @@ def build_sweep_cfg() -> dict[str, Any]:
             },
         },
         "grid": {
-            "preset": ["resnet", "fttransformer"],
+            "preset": ["small", "resnet", "fttransformer"],
         },
     }
 
@@ -110,6 +110,7 @@ def build_sweep_cfg() -> dict[str, Any]:
                 "min_exposure": 25.0,
                 "optimizer": "MetaSGD",
                 "lr": 0.01,
+                "vectorized_clients": True,
             },
             "grid": {
                 "local_epochs": [1,2,5],
@@ -137,6 +138,8 @@ def build_sweep_cfg() -> dict[str, Any]:
         "grid": {
             # Nested key sweep example:
             # "invertingconfig": {"at_iterations": [100, 500, 1000]},
+            "attack_schedule": "exposure",
+            "attack_exposure_milestones": [0.0, 4.0, 8.0, 16.0, 24.0],
         },
     }
 

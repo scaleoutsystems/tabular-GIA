@@ -130,6 +130,7 @@ class FTTransformerWrapper(ModelWrapper):
 
         self.n_num_features = int(n_num_features)
         self.n_cat_features = int(len(cat_cardinalities))
+        self.gia_forward_mode = "probabilities"
         self.gia_soft_temperature = 1.0
         self.gia_init_logit_scale = 5.0
         self.cat_cardinalities = [int(c) for c in cat_cardinalities]
@@ -168,18 +169,23 @@ class FTTransformerWrapper(ModelWrapper):
         x_cat = torch.clamp(x_cat, min=0.0)
         x_cat = torch.minimum(x_cat, self.cat_index_max.to(device=x_cat.device, dtype=x_cat.dtype))
         x_idx = x_cat.long()
-        cat_logits = []
+        cat_blocks = []
         for i, card in enumerate(self.cat_cardinalities):
-            scale = float(self.gia_init_logit_scale)
-            logits = torch.full(
-                (x.shape[0], card),
-                fill_value=-scale,
-                device=x.device,
-                dtype=x.dtype,
-            )
-            logits.scatter_(1, x_idx[:, i : i + 1], scale)
-            cat_logits.append(logits)
-        return torch.cat([x_num, *cat_logits], dim=1)
+            if str(self.gia_forward_mode).strip().lower() == "probabilities":
+                probs = torch.zeros((x.shape[0], card), device=x.device, dtype=x.dtype)
+                probs.scatter_(1, x_idx[:, i : i + 1], 1.0)
+                cat_blocks.append(probs)
+            else:
+                scale = float(self.gia_init_logit_scale)
+                logits = torch.full(
+                    (x.shape[0], card),
+                    fill_value=-scale,
+                    device=x.device,
+                    dtype=x.dtype,
+                )
+                logits.scatter_(1, x_idx[:, i : i + 1], scale)
+                cat_blocks.append(logits)
+        return torch.cat([x_num, *cat_blocks], dim=1)
 
     def from_gia_space(self, x_gia: torch.Tensor) -> torch.Tensor:
         if self.n_cat_features <= 0:
@@ -212,16 +218,25 @@ class FTTransformerWrapper(ModelWrapper):
         return self.backbone.backbone(torch.cat(tokens, dim=1))
 
     def forward_gia(self, x_gia: torch.Tensor) -> torch.Tensor:
-        """Differentiable FTTransformer path over simplex-relaxed categorical logits."""
+        """Differentiable FTTransformer path over relaxed categorical variables."""
         x_num = x_gia[:, : self.n_num_features].float()
         if self.n_cat_features <= 0:
             return self.backbone(x_num, None)
-        tau = max(float(self.gia_soft_temperature), 1e-8)
+        mode = str(self.gia_forward_mode).strip().lower()
         start = self.n_num_features
         cat_probs = []
         for card in self.cat_cardinalities:
-            logits = x_gia[:, start : start + card] / tau
-            cat_probs.append(torch.softmax(logits, dim=1))
+            cat_slice = x_gia[:, start : start + card]
+            if mode == "probabilities":
+                probs = torch.clamp(cat_slice, min=0.0)
+                denom = probs.sum(dim=1, keepdim=True)
+                uniform = torch.full_like(probs, 1.0 / float(card))
+                probs = torch.where(denom > 0, probs / denom.clamp_min(1e-12), uniform)
+                cat_probs.append(probs)
+            else:
+                tau = max(float(self.gia_soft_temperature), 1e-8)
+                logits = cat_slice / tau
+                cat_probs.append(torch.softmax(logits, dim=1))
             start += card
         return self._build_tokens_from_cat_probs(x_num, cat_probs)
 
