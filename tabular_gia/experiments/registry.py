@@ -9,6 +9,8 @@ from experiments.fedsgd.experiment_fedsgd_fixed_batch import FedSGDFixedBatchRun
 
 # fedavg
 from tabular_gia.experiments.fedavg.experiment_fedavg_local_steps_local_epochs_max_cap_32 import FedAvgLocalStepsLocalEpochsBatchSizesMaxCap32Runner
+from tabular_gia.experiments.fedavg.sensitivity_fedavg_local_steps_local_epochs_max_cap_16 import FedAvgLocalStepsLocalEpochsBatchSizesMaxCap16Runner
+from tabular_gia.experiments.fedavg.sensitivity_fedavg_local_steps_local_epochs_max_cap_64 import FedAvgLocalStepsLocalEpochsBatchSizesMaxCap64Runner
 
 
 EXPERIMENT_RUNNERS = {
@@ -23,4 +25,6 @@ EXPERIMENT_RUNNERS = {
 
     # fedavg
     "fedavglocalstepslocalepochsmaxcap32": FedAvgLocalStepsLocalEpochsBatchSizesMaxCap32Runner,
+    "fedavglocalstepslocalepochsmaxcap16": FedAvgLocalStepsLocalEpochsBatchSizesMaxCap16Runner,
+    "fedavglocalstepslocalepochsmaxcap64": FedAvgLocalStepsLocalEpochsBatchSizesMaxCap64Runner,
 }

@@ -139,7 +139,7 @@ def build_sweep_cfg() -> dict[str, Any]:
             # Nested key sweep example:
             # "invertingconfig": {"at_iterations": [100, 500, 1000]},
             "attack_schedule": "exposure",
-            "attack_exposure_milestones": [0.0, 4.0, 8.0, 16.0, 24.0],
+            "attack_exposure_milestones": [[0.0, 4.0, 8.0, 16.0, 24.0]],
         },
     }
 
@@ -152,7 +152,7 @@ def build_sweep_cfg() -> dict[str, Any]:
     }
 
 
-class FedAvgLocalStepsLocalEpochsBatchSizesMaxCap32Runner(SweepExperimentRunner):
+class FedAvgLocalStepsLocalEpochsBatchSizesMaxCap16Runner(SweepExperimentRunner):
     def __init__(
         self,
         sweep_cfg,
