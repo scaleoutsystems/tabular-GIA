@@ -1,6 +1,8 @@
 import argparse
 from pathlib import Path
+from typing import Any
 
+from matplotlib.lines import Line2D
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -175,6 +177,123 @@ def _plot_final_checkpoint_tradeoff(plot_rows: pd.DataFrame, title: str) -> plt.
         va="bottom",
         fontsize=8.5,
         bbox={"boxstyle": "round,pad=0.22", "facecolor": "white", "alpha": 0.9, "edgecolor": "0.8"},
+    )
+    return fig
+
+
+def _plot_cross_model_final_checkpoint_tradeoff(
+    plot_rows: pd.DataFrame,
+    *,
+    protocol_clean_name: str,
+    dataset_clean_name: str,
+    task_clean_name: str,
+) -> plt.Figure:
+    set_plot_paper_style()
+    fig, ax = plt.subplots(figsize=(7.4, 5.3))
+
+    utility_metric = str(plot_rows["utility_metric"].iloc[0])
+    final_rows = (
+        plot_rows.sort_values(["model_name", "batch_size", "exp_min"])
+        .groupby(["model_name", "batch_size"], as_index=False)
+        .tail(1)
+        .sort_values(["batch_size", "model_name"])
+        .reset_index(drop=True)
+    )
+    batch_styles = _batch_styles(final_rows["batch_size"].astype(int).unique().tolist())
+    model_names = _ordered_model_names(final_rows["model_name"].astype(str).unique().tolist())
+    model_markers = {
+        model_name: PLOT_MARKERS[idx % len(PLOT_MARKERS)]
+        for idx, model_name in enumerate(model_names)
+    }
+
+    for row in final_rows.itertuples(index=False):
+        batch_size = int(row.batch_size)
+        model_name = str(row.model_name)
+        color, _ = batch_styles[batch_size]
+        ax.scatter(
+            float(row.utility_mean),
+            float(row.tableak_acc_mean),
+            color=color,
+            marker=model_markers[model_name],
+            s=PLOT_SCATTER_SIZE * 1.35,
+            edgecolors=PLOT_MARKER_EDGECOLOR,
+            linewidths=PLOT_MARKER_EDGEWIDTH,
+            zorder=PLOT_MARKER_ZORDER,
+            clip_on=False,
+        )
+
+    _apply_axis_finish(
+        ax,
+        title=(
+            f"{protocol_clean_name}: Final Privacy-Utility Trade-off "
+            f"({dataset_clean_name}, {task_clean_name})"
+        ),
+        xlabel=clean_name(utility_metric, FL_METRIC_CLEAN_NAMES),
+        ylabel=ATTACK_METRIC_LABEL,
+        ylim=(0.0, BOUNDED_METRIC_YMAX),
+    )
+    xlim = fl_metric_limits(utility_metric, final_rows["utility_mean"])
+    if xlim is not None:
+        ax.set_xlim(*xlim)
+
+    batch_handles = [
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            linestyle="",
+            markerfacecolor=batch_styles[batch_size][0],
+            markeredgecolor=PLOT_MARKER_EDGECOLOR,
+            markeredgewidth=PLOT_MARKER_EDGEWIDTH,
+            markersize=PLOT_MARKERSIZE + 1.0,
+            label=str(batch_size),
+        )
+        for batch_size in sorted(batch_styles)
+    ]
+    model_handles = [
+        Line2D(
+            [0],
+            [0],
+            marker=model_markers[model_name],
+            linestyle="",
+            markerfacecolor="0.25",
+            markeredgecolor=PLOT_MARKER_EDGECOLOR,
+            markeredgewidth=PLOT_MARKER_EDGEWIDTH,
+            markersize=PLOT_MARKERSIZE + 1.0,
+            label=clean_name(model_name, MODEL_CLEAN_NAMES),
+        )
+        for model_name in model_names
+    ]
+    ax.text(
+        0.02,
+        0.02,
+        "One point per model and batch size at the synchronized 100% checkpoint.",
+        transform=ax.transAxes,
+        ha="left",
+        va="bottom",
+        fontsize=8.5,
+        bbox={"boxstyle": "round,pad=0.22", "facecolor": "white", "alpha": 0.9, "edgecolor": "0.8"},
+    )
+    batch_legend = ax.legend(
+        handles=batch_handles,
+        title="Client Batch Size",
+        ncol=3,
+        frameon=True,
+        loc="lower left",
+        bbox_to_anchor=(0.02, 0.13),
+        borderaxespad=0.0,
+    )
+    style_legend(batch_legend)
+    ax.add_artist(batch_legend)
+    style_legend(
+        ax.legend(
+            handles=model_handles,
+            title="Model Architecture",
+            frameon=True,
+            loc="lower left",
+            bbox_to_anchor=(0.02, 0.42),
+            borderaxespad=0.0,
+        )
     )
     return fig
 
@@ -617,6 +736,7 @@ def main() -> None:
         task_clean_name = clean_name(str(dataset_attack["task_objective"].iloc[0]), TASK_CLEAN_NAMES)
 
         cross_model_attack_base = f"fedsgd_batch_sizes_cross_model_attack_vs_exposure__dataset_{dataset_suffix}"
+        cross_model_tradeoff_base = f"fedsgd_batch_sizes_cross_model_final_checkpoint_tradeoff__dataset_{dataset_suffix}"
         model_batch_attack_metrics_base = f"fedsgd_batch_sizes_model_batch_attack_metrics__dataset_{dataset_suffix}"
 
         cross_png, cross_pdf = _save_figure(
@@ -628,6 +748,16 @@ def main() -> None:
             ),
             image_panels_dir / cross_model_attack_base,
             pdf_base_path=pdf_panels_dir / cross_model_attack_base,
+        )
+        tradeoff_png, tradeoff_pdf = _save_figure(
+            _plot_cross_model_final_checkpoint_tradeoff(
+                dataset_pareto,
+                protocol_clean_name=protocol_clean_name,
+                dataset_clean_name=dataset_clean_name,
+                task_clean_name=task_clean_name,
+            ),
+            image_singles_dir / cross_model_tradeoff_base,
+            pdf_base_path=pdf_singles_dir / cross_model_tradeoff_base,
         )
         metrics_png, metrics_pdf = _save_figure(
             _plot_model_batch_attack_metrics(
@@ -641,10 +771,20 @@ def main() -> None:
         )
         print(cross_png)
         print(cross_pdf)
+        print(tradeoff_png)
+        print(tradeoff_pdf)
         print(metrics_png)
         print(metrics_pdf)
 
         dataset_attack.to_csv(data_dir / f"{cross_model_attack_base}_data.csv", index=False)
+        cross_model_tradeoff_rows = (
+            dataset_pareto.sort_values(["model_name", "batch_size", "exp_min"])
+            .groupby(["model_name", "batch_size"], as_index=False)
+            .tail(1)
+            .sort_values(["batch_size", "model_name"])
+            .reset_index(drop=True)
+        )
+        cross_model_tradeoff_rows.to_csv(data_dir / f"{cross_model_tradeoff_base}_data.csv", index=False)
         dataset_attack.to_csv(data_dir / f"{model_batch_attack_metrics_base}_data.csv", index=False)
 
         model_names = sorted(dataset_attack["model_name"].astype(str).unique().tolist())

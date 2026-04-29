@@ -43,6 +43,12 @@ METRIC_ALIASES = {
     "tableak": "tableak_acc",
 }
 
+UTILITY_METRIC_ALIASES = {
+    "val_roc_auc": "val_roc_auc",
+    "roc_auc": "val_roc_auc",
+    "auc": "val_roc_auc",
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -82,6 +88,10 @@ def parse_args() -> argparse.Namespace:
 
 def _resolve_metric_name(metric_name: str) -> str:
     return METRIC_ALIASES.get(metric_name.strip().lower(), metric_name.strip())
+
+
+def _resolve_utility_metric_name(metric_name: str) -> str:
+    return UTILITY_METRIC_ALIASES.get(metric_name.strip().lower(), metric_name.strip())
 
 
 def _dataset_name_from_dir(experiment_dir: Path) -> str:
@@ -159,6 +169,49 @@ def _collect_final_rows(experiment_dir: Path, protocol_subdir: str, metric_name:
 
     if not rows:
         raise FileNotFoundError(f"No usable run rows found under {protocol_dir}")
+    return pd.DataFrame(rows)
+
+
+def _collect_best_utility_rows(experiment_dir: Path, protocol_subdir: str, metric_name: str) -> pd.DataFrame:
+    protocol_dir = experiment_dir / protocol_subdir
+    if not protocol_dir.exists():
+        raise FileNotFoundError(f"Protocol directory not found: {protocol_dir}")
+
+    rows: list[dict[str, Any]] = []
+    for run_dir in sorted(protocol_dir.glob("run_*")):
+        metadata = _load_run_metadata(run_dir)
+        if metadata is None:
+            continue
+
+        stats_path = run_dir / "aggregated" / "fl_stats.csv"
+        if not stats_path.exists():
+            raise FileNotFoundError(f"Missing FL stats file: {stats_path}")
+
+        stats = pd.read_csv(stats_path)
+        if stats.empty:
+            raise ValueError(f"FL stats file is empty: {stats_path}")
+
+        mean_col = f"{metric_name}_mean"
+        std_col = f"{metric_name}_std"
+        if mean_col not in stats.columns:
+            raise ValueError(f"Metric '{metric_name}' not found in {stats_path}. Expected column '{mean_col}'.")
+
+        phase_rows = stats[stats["phase"] == "checkpoint"].copy()
+        if phase_rows.empty:
+            phase_rows = stats.copy()
+
+        best_row = phase_rows.sort_values(mean_col, ascending=False).iloc[0]
+        rows.append(
+            {
+                **metadata,
+                "utility_mean": float(best_row[mean_col]),
+                "utility_std": float(best_row[std_col]) if std_col in best_row and pd.notna(best_row[std_col]) else 0.0,
+                "utility_round": int(best_row["round"]),
+            }
+        )
+
+    if not rows:
+        raise FileNotFoundError(f"No usable utility rows found under {protocol_dir}")
     return pd.DataFrame(rows)
 
 
@@ -295,11 +348,10 @@ def format_latex_table(
 
 
 def format_module_combo_extremes_table(
-    lowest: pd.DataFrame,
-    highest: pd.DataFrame,
+    lowest_by_batch: dict[int, pd.DataFrame],
+    highest_by_batch: dict[int, pd.DataFrame],
     *,
     dataset_name: str,
-    batch_size: int,
     label_suffix: str,
     decimals: int,
 ) -> str:
@@ -308,7 +360,7 @@ def format_module_combo_extremes_table(
     lines.append("\\centering")
     lines.append("\\small")
     lines.append(
-        f"\\caption{{Lowest- and highest-leakage module combinations on {dataset_name} at batch size {batch_size}. "
+        f"\\caption{{Lowest- and highest-reconstruction module combinations on {dataset_name} for batch sizes 8 and 32. "
         f"Reconstruction accuracy is averaged over width and depth and reported at the final attacked checkpoint.}}"
     )
     lines.append(f"\\label{{tab:torch-modules-{label_suffix}}}")
@@ -316,26 +368,77 @@ def format_module_combo_extremes_table(
     lines.append("\\hline")
     lines.append("Rank & Normalization & Activation & Dropout & Recon. Acc. \\\\")
     lines.append("\\hline")
-    lines.append("\\multicolumn{5}{c}{Lowest leakage} \\\\")
+    ordered_batches = sorted(lowest_by_batch)
+    for batch_size in ordered_batches:
+        lines.append(f"\\multicolumn{{5}}{{c}}{{Batch size {batch_size}: Lowest reconstruction accuracy}} \\\\")
+        lines.append("\\hline")
+        for idx, row in enumerate(lowest_by_batch[batch_size].itertuples(index=False), start=1):
+            lines.append(
+                f"{idx} & {_format_factor_level('norm', row.norm)} & "
+                f"{_format_factor_level('activation', row.activation)} & "
+                f"{_format_factor_level('dropout', row.dropout)} & "
+                f"{float(row.metric_mean):.{decimals}f} $\\pm$ {float(row.metric_std):.{decimals}f} \\\\"
+            )
+        lines.append("\\hline")
+        lines.append(f"\\multicolumn{{5}}{{c}}{{Batch size {batch_size}: Highest reconstruction accuracy}} \\\\")
+        lines.append("\\hline")
+        for idx, row in enumerate(highest_by_batch[batch_size].itertuples(index=False), start=1):
+            lines.append(
+                f"{idx} & {_format_factor_level('norm', row.norm)} & "
+                f"{_format_factor_level('activation', row.activation)} & "
+                f"{_format_factor_level('dropout', row.dropout)} & "
+                f"{float(row.metric_mean):.{decimals}f} $\\pm$ {float(row.metric_std):.{decimals}f} \\\\"
+            )
+        lines.append("\\hline")
+    lines.append("\\end{tabular}")
+    lines.append("\\end{table}")
+    return "\n".join(lines)
+
+
+def _build_top_raw_configs(
+    utility_rows: pd.DataFrame,
+    *,
+    batch_size: int,
+    top_k: int = 5,
+) -> pd.DataFrame:
+    batch_rows = utility_rows[utility_rows["batch_size"] == batch_size].copy()
+    ordered = batch_rows.sort_values(["utility_mean", "utility_std"], ascending=[False, True]).reset_index(drop=True)
+    return ordered.head(top_k).copy().reset_index(drop=True)
+
+
+def format_top_raw_utility_configs_table(
+    top_by_batch: dict[int, pd.DataFrame],
+    *,
+    dataset_name: str,
+    utility_metric_label: str,
+    label_suffix: str,
+    decimals: int,
+) -> str:
+    lines: list[str] = []
+    lines.append("\\begin{table}[t]")
+    lines.append("\\centering")
+    lines.append("\\small")
+    lines.append(
+        f"\\caption{{Top raw architectural configurations on {dataset_name} ranked by best validation {utility_metric_label} for batch sizes 8 and 32. "
+        f"Scores are reported as mean $\\pm$ standard deviation across seeds at the best validation checkpoint for each configuration.}}"
+    )
+    lines.append(f"\\label{{tab:torch-modules-{label_suffix}}}")
+    lines.append("\\begin{tabular}{ccccccc}")
     lines.append("\\hline")
-    for idx, row in enumerate(lowest.itertuples(index=False), start=1):
-        lines.append(
-            f"{idx} & {_format_factor_level('norm', row.norm)} & "
-            f"{_format_factor_level('activation', row.activation)} & "
-            f"{_format_factor_level('dropout', row.dropout)} & "
-            f"{float(row.metric_mean):.{decimals}f} $\\pm$ {float(row.metric_std):.{decimals}f} \\\\"
-        )
+    lines.append("Rank & Width & Layers & Normalization & Activation & Dropout & Val ROC-AUC \\\\")
     lines.append("\\hline")
-    lines.append("\\multicolumn{5}{c}{Highest leakage} \\\\")
-    lines.append("\\hline")
-    for idx, row in enumerate(highest.itertuples(index=False), start=1):
-        lines.append(
-            f"{idx} & {_format_factor_level('norm', row.norm)} & "
-            f"{_format_factor_level('activation', row.activation)} & "
-            f"{_format_factor_level('dropout', row.dropout)} & "
-            f"{float(row.metric_mean):.{decimals}f} $\\pm$ {float(row.metric_std):.{decimals}f} \\\\"
-        )
-    lines.append("\\hline")
+    for batch_size in sorted(top_by_batch):
+        lines.append(f"\\multicolumn{{7}}{{c}}{{Batch size {batch_size}}} \\\\")
+        lines.append("\\hline")
+        for idx, row in enumerate(top_by_batch[batch_size].itertuples(index=False), start=1):
+            lines.append(
+                f"{idx} & {int(row.d_hidden)} & {int(row.n_hidden_layers)} & "
+                f"{_format_factor_level('norm', row.norm)} & "
+                f"{_format_factor_level('activation', row.activation)} & "
+                f"{_format_factor_level('dropout', row.dropout)} & "
+                f"{float(row.utility_mean):.{decimals}f} $\\pm$ {float(row.utility_std):.{decimals}f} \\\\"
+            )
+        lines.append("\\hline")
     lines.append("\\end{tabular}")
     lines.append("\\end{table}")
     return "\n".join(lines)
@@ -345,9 +448,15 @@ def main() -> None:
     args = parse_args()
     experiment_dir = args.experiment_dir.resolve()
     metric_name = _resolve_metric_name(args.metric)
+    utility_metric_name = _resolve_utility_metric_name("val_roc_auc")
     dataset_name = _clean_dataset_name(args.dataset_name or _dataset_name_from_dir(experiment_dir))
 
     final_rows = _collect_final_rows(experiment_dir=experiment_dir, protocol_subdir=args.protocol_subdir, metric_name=metric_name)
+    utility_rows = _collect_best_utility_rows(
+        experiment_dir=experiment_dir,
+        protocol_subdir=args.protocol_subdir,
+        metric_name=utility_metric_name,
+    )
     factor_rows = _aggregate_factor_rows(final_rows, STRUCTURAL_FACTORS + MODULE_FACTORS)
 
     structural_frame = _build_factor_frame(
@@ -358,7 +467,20 @@ def main() -> None:
         factor_rows[factor_rows["dataset_name"] == final_rows["dataset_name"].iloc[0]].copy(),
         MODULE_FACTORS,
     )
-    lowest_module_combos, highest_module_combos = _build_module_combo_extremes(final_rows, batch_size=8, top_k=3)
+    lowest_by_batch: dict[int, pd.DataFrame] = {}
+    highest_by_batch: dict[int, pd.DataFrame] = {}
+    top_utility_by_batch: dict[int, pd.DataFrame] = {}
+    for batch_size in (8, 32):
+        lowest_by_batch[batch_size], highest_by_batch[batch_size] = _build_module_combo_extremes(
+            final_rows,
+            batch_size=batch_size,
+            top_k=3,
+        )
+        top_utility_by_batch[batch_size] = _build_top_raw_configs(
+            utility_rows,
+            batch_size=batch_size,
+            top_k=5,
+        )
 
     dataset_slug = (args.dataset_name or _dataset_name_from_dir(experiment_dir)).replace("_", "-").lower()
     print(
@@ -383,11 +505,20 @@ def main() -> None:
     print()
     print(
         format_module_combo_extremes_table(
-            lowest_module_combos,
-            highest_module_combos,
+            lowest_by_batch,
+            highest_by_batch,
             dataset_name=dataset_name,
-            batch_size=8,
-            label_suffix=f"{dataset_slug}-batch8-module-extremes",
+            label_suffix=f"{dataset_slug}-module-extremes",
+            decimals=args.decimals,
+        )
+    )
+    print()
+    print(
+        format_top_raw_utility_configs_table(
+            top_utility_by_batch,
+            dataset_name=dataset_name,
+            utility_metric_label="ROC-AUC",
+            label_suffix=f"{dataset_slug}-top-utility-configs",
             decimals=args.decimals,
         )
     )
