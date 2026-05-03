@@ -277,9 +277,13 @@ def fl_metric_limits(
     if metric in FL_BOUNDED_METRICS:
         return (0.0, bounded_metric_ymax)
     if metric in {"val_r2", "test_r2"}:
-        lo = float(values.min())
-        hi = float(values.max())
-        return (lo, hi)
+        clean = pd.to_numeric(values, errors="coerce").dropna()
+        if clean.empty:
+            return None
+        lo = float(clean.min())
+        hi = float(clean.max())
+        padding = max(0.02, 0.05 * max(hi - lo, 1e-6))
+        return (min(lo - padding, 1.0 - padding), 1.0)
     return None
 
 
@@ -288,7 +292,7 @@ def is_bounded_fl_metric(metric: str) -> bool:
 
 
 def ordered_model_names(model_names: list[str]) -> list[str]:
-    preferred = ["small", "resnet", "fttransformer"]
+    preferred = ["fttransformer", "resnet", "small"]
     seen = set(model_names)
     ordered = [name for name in preferred if name in seen]
     ordered.extend(sorted(name for name in model_names if name not in preferred))

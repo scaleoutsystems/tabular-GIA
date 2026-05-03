@@ -79,9 +79,14 @@ def plot_fl_metric_vs_exposure_on_axes(
     )
 
 
-def plot_fl_metric_vs_exposure(plot_rows: pd.DataFrame, title: str) -> plt.Figure:
+def plot_fl_metric_vs_exposure(
+    plot_rows: pd.DataFrame,
+    title: str,
+    *,
+    ylim: tuple[float, float] | None = None,
+) -> plt.Figure:
     set_plot_paper_style()
     fig, ax = plt.subplots(figsize=(7.6, 4.8))
-    plot_fl_metric_vs_exposure_on_axes(ax, plot_rows, title=title)
+    plot_fl_metric_vs_exposure_on_axes(ax, plot_rows, title=title, ylim=ylim)
     style_legend(ax.legend(title="Client Batch Size", ncol=2, frameon=True))
     return fig

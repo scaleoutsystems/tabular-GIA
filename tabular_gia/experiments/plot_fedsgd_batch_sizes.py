@@ -540,10 +540,19 @@ def _plot_model_batch_attack_metrics(
     protocol_clean_name: str,
     dataset_clean_name: str,
     task_clean_name: str,
+    orientation: str = "models_rows",
+    legend_order: str = "legacy",
 ) -> plt.Figure:
     set_plot_paper_style()
+    if orientation not in {"models_rows", "models_columns"}:
+        raise ValueError(f"Unsupported orientation: {orientation}")
+    if legend_order not in {"legacy", "semantic"}:
+        raise ValueError(f"Unsupported legend order: {legend_order}")
+
     model_names = _ordered_model_names(dataset_attack["model_name"].astype(str).unique().tolist())
     batch_sizes = sorted(dataset_attack["batch_size"].astype(int).unique().tolist())
+    n_rows = len(model_names) if orientation == "models_rows" else len(batch_sizes)
+    n_cols = len(batch_sizes) if orientation == "models_rows" else len(model_names)
     metric_colors = sample_group_colors(3)
     metric_specs = [
         ("tableak_acc_mean", "tableak_acc_ci95", ATTACK_METRIC_LABEL, metric_colors[0], "o"),
@@ -551,21 +560,38 @@ def _plot_model_batch_attack_metrics(
         ("cat_acc_mean", "cat_acc_ci95", "Categorical Accuracy", metric_colors[2], "^"),
     ]
     fig, axes = plt.subplots(
-        len(model_names),
-        len(batch_sizes),
-        figsize=(2.35 * len(batch_sizes), 2.7 * len(model_names)),
+        n_rows,
+        n_cols,
+        figsize=(2.35 * n_cols, 2.7 * n_rows),
         sharex=True,
         sharey=True,
     )
-    axes_grid = np.atleast_2d(axes)
+    axes_grid = np.asarray(axes, dtype=object).reshape(n_rows, n_cols)
     legend_handles: list[Any] = []
     legend_labels: list[str] = []
 
-    for row_idx, model_name in enumerate(model_names):
-        model_rows = dataset_attack[dataset_attack["model_name"] == model_name].copy()
-        for col_idx, batch_size in enumerate(batch_sizes):
+    for row_idx in range(n_rows):
+        for col_idx in range(n_cols):
+            if orientation == "models_rows":
+                model_name = model_names[row_idx]
+                batch_size = batch_sizes[col_idx]
+                title = f"Client Batch Size {batch_size}" if row_idx == 0 else ""
+                y_label = (
+                    f"{clean_name(model_name, MODEL_CLEAN_NAMES)}\n{ATTACK_METRIC_LABEL}"
+                    if col_idx == 0
+                    else ""
+                )
+            else:
+                batch_size = batch_sizes[row_idx]
+                model_name = model_names[col_idx]
+                title = clean_name(model_name, MODEL_CLEAN_NAMES) if row_idx == 0 else ""
+                y_label = f"Client Batch Size {batch_size}\n{ATTACK_METRIC_LABEL}" if col_idx == 0 else ""
+
             ax = axes_grid[row_idx, col_idx]
-            cell_rows = model_rows[model_rows["batch_size"] == batch_size].sort_values("exp_min").copy()
+            cell_rows = dataset_attack[
+                (dataset_attack["model_name"] == model_name)
+                & (dataset_attack["batch_size"] == batch_size)
+            ].sort_values("exp_min").copy()
             if cell_rows.empty:
                 ax.set_axis_off()
                 ax.text(0.5, 0.5, "N/A", ha="center", va="center", transform=ax.transAxes, fontsize=10)
@@ -626,26 +652,50 @@ def _plot_model_batch_attack_metrics(
             if row_idx == 0 and col_idx == 0:
                 legend_handles, legend_labels = ax.get_legend_handles_labels()
 
-            title = f"Client Batch Size {batch_size}" if row_idx == 0 else ""
-            y_label = clean_name(model_name, MODEL_CLEAN_NAMES) if col_idx == 0 else ""
             _apply_axis_finish(
                 ax,
                 title=title,
-                xlabel=clean_name("exp_min", X_AXIS_CLEAN_NAMES) if row_idx == len(model_names) - 1 else "",
+                xlabel=clean_name("exp_min", X_AXIS_CLEAN_NAMES) if row_idx == n_rows - 1 else "",
                 ylabel=y_label,
                 ylim=(0.0, BOUNDED_METRIC_YMAX),
             )
 
     if legend_handles:
-        display_order = [0, 3, 1, 4, 2]
-        ordered_handles = [legend_handles[idx] for idx in display_order if idx < len(legend_handles)]
-        ordered_labels = [legend_labels[idx] for idx in display_order if idx < len(legend_labels)]
+        if legend_order == "semantic":
+            has_categorical = "Categorical Accuracy" in legend_labels
+            # Matplotlib fills multi-column legends column-wise, so the order
+            # below yields visual rows of attack metrics first and baselines second.
+            label_order = (
+                [
+                    ATTACK_METRIC_LABEL,
+                    "Client Prior Baseline",
+                    "Numerical Accuracy",
+                    "Uniform Random Baseline",
+                    "Categorical Accuracy",
+                ]
+                if has_categorical
+                else [
+                    ATTACK_METRIC_LABEL,
+                    "Client Prior Baseline",
+                    "Numerical Accuracy",
+                    "Uniform Random Baseline",
+                ]
+            )
+            handle_by_label = dict(zip(legend_labels, legend_handles, strict=False))
+            ordered_labels = [label for label in label_order if label in handle_by_label]
+            ordered_handles = [handle_by_label[label] for label in ordered_labels]
+            legend_ncol = 3 if has_categorical else 2
+        else:
+            display_order = [0, 3, 1, 4, 2]
+            ordered_handles = [legend_handles[idx] for idx in display_order if idx < len(legend_handles)]
+            ordered_labels = [legend_labels[idx] for idx in display_order if idx < len(legend_labels)]
+            legend_ncol = 3
         style_legend(
             fig.legend(
                 ordered_handles,
                 ordered_labels,
                 loc="upper center",
-                ncol=3,
+                ncol=legend_ncol,
                 frameon=True,
                 bbox_to_anchor=(0.5, 0.997),
             )
@@ -729,6 +779,18 @@ def main() -> None:
         dataset_utility_checkpoint = utility_checkpoint_plot[utility_checkpoint_plot["dataset_name"] == dataset_name].copy()
         if dataset_attack.empty or dataset_pareto.empty:
             continue
+        dataset_utility_ylims = {
+            str(metric): fl_metric_limits(str(metric), rows["utility_mean"])
+            for metric, rows in dataset_utility.groupby("utility_metric")
+        }
+        dataset_final_test_ylims = (
+            {
+                str(metric): fl_metric_limits(str(metric), rows["utility_mean"])
+                for metric, rows in dataset_final_test.groupby("utility_metric")
+            }
+            if not dataset_final_test.empty
+            else {}
+        )
 
         dataset_suffix = _sanitize_for_filename(dataset_name)
         protocol_clean_name = clean_name(args.protocol_subdir, PROTOCOL_CLEAN_NAMES)
@@ -808,6 +870,7 @@ def main() -> None:
             model_clean_name = clean_name(model_name, MODEL_CLEAN_NAMES)
             utility_metric = str(utility_slice["utility_metric"].iloc[0])
             utility_label = clean_name(utility_metric, FL_METRIC_CLEAN_NAMES)
+            utility_ylim = dataset_utility_ylims.get(utility_metric)
 
             attack_title = (
                 f"{protocol_clean_name}: {ATTACK_METRIC_LABEL} Across Client Batch Sizes "
@@ -823,6 +886,7 @@ def main() -> None:
                 else metric_for_final_test(utility_metric)
             )
             final_test_label = clean_name(final_test_metric, FL_METRIC_CLEAN_NAMES)
+            final_test_ylim = dataset_final_test_ylims.get(final_test_metric)
             final_test_title = (
                 f"{protocol_clean_name}: {final_test_label} at Best Validation Checkpoint Exposure "
                 f"({model_clean_name}, {dataset_clean_name}, {task_clean_name})"
@@ -873,7 +937,7 @@ def main() -> None:
             )
             output_paths.append(
                 _save_figure(
-                    plot_fl_metric_vs_exposure(utility_slice, utility_title),
+                    plot_fl_metric_vs_exposure(utility_slice, utility_title, ylim=utility_ylim),
                     image_singles_dir / utility_base,
                     pdf_base_path=pdf_singles_dir / utility_base,
                 )
@@ -881,7 +945,7 @@ def main() -> None:
             if not final_test_slice.empty:
                 output_paths.append(
                     _save_figure(
-                        plot_fl_metric_vs_exposure(final_test_slice, final_test_title),
+                        plot_fl_metric_vs_exposure(final_test_slice, final_test_title, ylim=final_test_ylim),
                         image_singles_dir / final_test_base,
                         pdf_base_path=pdf_singles_dir / final_test_base,
                     )
@@ -915,7 +979,7 @@ def main() -> None:
                         ci_col="utility_ci95",
                         ylabel=utility_label,
                         title=utility_summary_title,
-                        ylim=fl_metric_limits(utility_metric, utility_checkpoint_slice["utility_mean"]),
+                        ylim=utility_ylim,
                     ),
                     image_singles_dir / utility_summary_base,
                     pdf_base_path=pdf_singles_dir / utility_summary_base,

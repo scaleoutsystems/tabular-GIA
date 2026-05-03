@@ -235,6 +235,8 @@ def main() -> None:
                     protocol_clean_name=protocol_clean_name,
                     dataset_clean_name=dataset_clean_name,
                     task_clean_name=task_clean_name,
+                    orientation="models_columns",
+                    legend_order="semantic",
                 ),
                 image_panels_dir / model_batch_attack_metrics_base,
                 pdf_base_path=pdf_panels_dir / model_batch_attack_metrics_base,
