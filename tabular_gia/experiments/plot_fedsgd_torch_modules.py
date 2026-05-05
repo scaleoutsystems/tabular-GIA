@@ -378,22 +378,22 @@ def _legend_input_order_for_rowwise_display(n_items: int, ncol: int) -> list[int
 
 
 def _tradeoff_axis_limits(endpoint_rows: pd.DataFrame) -> tuple[tuple[float, float], tuple[float, float]]:
-    x = pd.to_numeric(endpoint_rows["utility_value"], errors="coerce").dropna().to_numpy(dtype=float)
-    y = pd.to_numeric(endpoint_rows["tableak_acc"], errors="coerce").dropna().to_numpy(dtype=float)
-    if len(x) == 0 or len(y) == 0:
-        return (0.0, 1.0), (0.0, DEFAULT_BOUNDED_METRIC_YMAX)
-
-    x_min = float(np.min(x))
-    x_max = float(np.max(x))
-    xlim = (x_min, x_max)
-
-    y_min = float(np.min(y))
-    y_max = float(np.max(y))
-    ylim = (
-        max(0.0, y_min),
-        min(DEFAULT_BOUNDED_METRIC_YMAX, y_max),
+    utility_metric = (
+        str(endpoint_rows["utility_metric"].iloc[0])
+        if "utility_metric" in endpoint_rows and not endpoint_rows.empty
+        else ""
     )
-    return xlim, ylim
+    xlim = fl_metric_limits(utility_metric, endpoint_rows["utility_value"]) if utility_metric else None
+    if xlim is None:
+        x = pd.to_numeric(endpoint_rows["utility_value"], errors="coerce").dropna().to_numpy(dtype=float)
+        if len(x) == 0:
+            xlim = (0.0, 1.0)
+        else:
+            x_min = float(np.min(x))
+            x_max = float(np.max(x))
+            xlim = (x_min, x_max)
+
+    return xlim, (0.0, DEFAULT_BOUNDED_METRIC_YMAX)
 
 
 def _plot_endpoint_tradeoff_grid(
@@ -507,37 +507,6 @@ def _plot_endpoint_tradeoff_grid(
     return fig
 
 
-def _figure_metric_limits(
-    plot_rows: pd.DataFrame,
-    *,
-    value_col: str,
-    ci_col: str,
-    default_ylim: tuple[float, float] | None,
-) -> tuple[float, float] | None:
-    values = pd.to_numeric(plot_rows[value_col], errors="coerce")
-    cis = pd.to_numeric(plot_rows[ci_col], errors="coerce").fillna(0.0)
-    valid = values.notna()
-    if not valid.any():
-        return default_ylim
-
-    lower = (values[valid] - cis[valid]).to_numpy(dtype=float)
-    upper = (values[valid] + cis[valid]).to_numpy(dtype=float)
-    data_min = float(np.nanmin(lower))
-    data_max = float(np.nanmax(upper))
-
-    bounded_upper = (
-        default_ylim is not None
-        and default_ylim[0] == 0.0
-        and default_ylim[1] == DEFAULT_BOUNDED_METRIC_YMAX
-    )
-    if bounded_upper:
-        data_min = max(0.0, data_min)
-        data_max = min(1.0, data_max)
-        return (data_min, data_max)
-
-    return (data_min, data_max)
-
-
 def _plot_batch_split_metric_grid(
     plot_rows: pd.DataFrame,
     *,
@@ -550,7 +519,6 @@ def _plot_batch_split_metric_grid(
     y_label: str,
     ylim: tuple[float, float] | None,
     title_metric_name: str,
-    tighten_figure_ylim: bool,
     baseline_specs: list[tuple[str, str]] | None = None,
     top_rect: float = 0.98,
 ) -> plt.Figure:
@@ -568,11 +536,7 @@ def _plot_batch_split_metric_grid(
     curve_colors = _curve_colors()
     curve_markers = _curve_markers()
     baseline_specs = baseline_specs or []
-    plot_ylim = (
-        _figure_metric_limits(plot_rows, value_col=value_col, ci_col=ci_col, default_ylim=ylim)
-        if tighten_figure_ylim
-        else ylim
-    )
+    plot_ylim = ylim
     bounded = plot_ylim is not None and plot_ylim[0] >= 0.0 and plot_ylim[1] <= DEFAULT_BOUNDED_METRIC_YMAX
 
     for row_idx, d_hidden in enumerate(width_levels):
@@ -819,7 +783,6 @@ def main() -> None:
                 y_label=ATTACK_METRIC_LABEL,
                 ylim=(0.0, DEFAULT_BOUNDED_METRIC_YMAX),
                 title_metric_name=ATTACK_METRIC_LABEL,
-                tighten_figure_ylim=False,
                 baseline_specs=[
                     ("prior_tableak_acc", BASELINE_LINESTYLE),
                     ("random_tableak_acc", BASELINE_LINESTYLE),
@@ -849,7 +812,6 @@ def main() -> None:
                 y_label="Numerical Accuracy",
                 ylim=(0.0, DEFAULT_BOUNDED_METRIC_YMAX),
                 title_metric_name="Numerical Accuracy",
-                tighten_figure_ylim=False,
                 baseline_specs=[
                     ("prior_num_acc", BASELINE_LINESTYLE),
                     ("random_num_acc", BASELINE_LINESTYLE),
@@ -879,7 +841,6 @@ def main() -> None:
                 y_label="Categorical Accuracy",
                 ylim=(0.0, DEFAULT_BOUNDED_METRIC_YMAX),
                 title_metric_name="Categorical Accuracy",
-                tighten_figure_ylim=False,
                 baseline_specs=[
                     ("prior_cat_acc", BASELINE_LINESTYLE),
                     ("random_cat_acc", BASELINE_LINESTYLE),
@@ -909,7 +870,6 @@ def main() -> None:
                 y_label=utility_label,
                 ylim=utility_ylim,
                 title_metric_name=utility_label,
-                tighten_figure_ylim=True,
             )
             png_path, pdf_path = save_figure(
                 utility_fig,

@@ -236,7 +236,6 @@ def main() -> None:
                     dataset_clean_name=dataset_clean_name,
                     task_clean_name=task_clean_name,
                     orientation="models_columns",
-                    legend_order="semantic",
                 ),
                 image_panels_dir / model_batch_attack_metrics_base,
                 pdf_base_path=pdf_panels_dir / model_batch_attack_metrics_base,
@@ -250,7 +249,7 @@ def main() -> None:
         dataset_attack_drop.to_csv(data_dir / f"{cross_model_attack_drop_base}_data.csv", index=False)
         dataset_attack.to_csv(data_dir / f"{model_batch_attack_metrics_base}_data.csv", index=False)
 
-        model_names = sorted(dataset_attack["model_name"].astype(str).unique().tolist())
+        model_names = ordered_model_names(dataset_attack["model_name"].astype(str).unique().tolist())
         for model_name in model_names:
             attack_slice = dataset_attack[dataset_attack["model_name"] == model_name].copy()
             attack_drop_slice = dataset_attack_drop[dataset_attack_drop["model_name"] == model_name].copy()

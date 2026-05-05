@@ -299,6 +299,15 @@ def ordered_model_names(model_names: list[str]) -> list[str]:
     return ordered
 
 
+def ordered_model_names_for_axis(model_names: list[str], axis: str) -> list[str]:
+    ordered = ordered_model_names(model_names)
+    if axis == "columns":
+        return ordered
+    if axis == "rows":
+        return list(reversed(ordered))
+    raise ValueError(f"Unsupported model axis: {axis}")
+
+
 def rename_plot_columns(rows: pd.DataFrame, rename_map: dict[str, str]) -> pd.DataFrame:
     out = rows.rename(columns=rename_map).copy()
     sort_cols = [col for col in ("batch_size", "checkpoint_idx", "exp_min", "exp_min_mean") if col in out.columns]

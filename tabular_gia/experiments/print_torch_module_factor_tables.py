@@ -266,12 +266,11 @@ def _build_factor_frame(
     return frame
 
 
-def _build_module_combo_extremes(
+def _build_module_combo_ranking(
     final_rows: pd.DataFrame,
     *,
     batch_size: int,
-    top_k: int = 3,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> pd.DataFrame:
     batch_rows = final_rows[final_rows["batch_size"] == batch_size].copy()
     grouped = (
         batch_rows.groupby(["norm", "activation", "dropout"], dropna=False)
@@ -284,9 +283,7 @@ def _build_module_combo_extremes(
         .reset_index(drop=True)
     )
     grouped["metric_std"] = grouped["metric_std"].fillna(0.0)
-    lowest = grouped.head(top_k).copy().reset_index(drop=True)
-    highest = grouped.tail(top_k).copy().sort_values("metric_mean", ascending=False).reset_index(drop=True)
-    return lowest, highest
+    return grouped
 
 
 def _format_cell(value: object, decimals: int) -> str:
@@ -347,9 +344,8 @@ def format_latex_table(
     return "\n".join(lines)
 
 
-def format_module_combo_extremes_table(
-    lowest_by_batch: dict[int, pd.DataFrame],
-    highest_by_batch: dict[int, pd.DataFrame],
+def format_module_combo_ranking_table(
+    rankings_by_batch: dict[int, pd.DataFrame],
     *,
     dataset_name: str,
     label_suffix: str,
@@ -360,29 +356,19 @@ def format_module_combo_extremes_table(
     lines.append("\\centering")
     lines.append("\\small")
     lines.append(
-        f"\\caption{{Lowest- and highest-reconstruction module combinations on {dataset_name} for batch sizes 8 and 32. "
-        f"Reconstruction accuracy is averaged over width and depth and reported at the final attacked checkpoint.}}"
+        f"\\caption{{Complete ranking of module combinations by final reconstruction accuracy on {dataset_name} for batch sizes 8 and 32. "
+        f"Rows are ordered from lowest to highest reconstruction accuracy. Reconstruction accuracy is averaged over width and depth and reported at the final attacked checkpoint.}}"
     )
     lines.append(f"\\label{{tab:torch-modules-{label_suffix}}}")
     lines.append("\\begin{tabular}{ccccc}")
     lines.append("\\hline")
     lines.append("Rank & Normalization & Activation & Dropout & Recon. Acc. \\\\")
     lines.append("\\hline")
-    ordered_batches = sorted(lowest_by_batch)
+    ordered_batches = sorted(rankings_by_batch)
     for batch_size in ordered_batches:
-        lines.append(f"\\multicolumn{{5}}{{c}}{{Batch size {batch_size}: Lowest reconstruction accuracy}} \\\\")
+        lines.append(f"\\multicolumn{{5}}{{c}}{{Batch size {batch_size}}} \\\\")
         lines.append("\\hline")
-        for idx, row in enumerate(lowest_by_batch[batch_size].itertuples(index=False), start=1):
-            lines.append(
-                f"{idx} & {_format_factor_level('norm', row.norm)} & "
-                f"{_format_factor_level('activation', row.activation)} & "
-                f"{_format_factor_level('dropout', row.dropout)} & "
-                f"{float(row.metric_mean):.{decimals}f} $\\pm$ {float(row.metric_std):.{decimals}f} \\\\"
-            )
-        lines.append("\\hline")
-        lines.append(f"\\multicolumn{{5}}{{c}}{{Batch size {batch_size}: Highest reconstruction accuracy}} \\\\")
-        lines.append("\\hline")
-        for idx, row in enumerate(highest_by_batch[batch_size].itertuples(index=False), start=1):
+        for idx, row in enumerate(rankings_by_batch[batch_size].itertuples(index=False), start=1):
             lines.append(
                 f"{idx} & {_format_factor_level('norm', row.norm)} & "
                 f"{_format_factor_level('activation', row.activation)} & "
@@ -467,14 +453,12 @@ def main() -> None:
         factor_rows[factor_rows["dataset_name"] == final_rows["dataset_name"].iloc[0]].copy(),
         MODULE_FACTORS,
     )
-    lowest_by_batch: dict[int, pd.DataFrame] = {}
-    highest_by_batch: dict[int, pd.DataFrame] = {}
+    module_rankings_by_batch: dict[int, pd.DataFrame] = {}
     top_utility_by_batch: dict[int, pd.DataFrame] = {}
     for batch_size in (8, 32):
-        lowest_by_batch[batch_size], highest_by_batch[batch_size] = _build_module_combo_extremes(
+        module_rankings_by_batch[batch_size] = _build_module_combo_ranking(
             final_rows,
             batch_size=batch_size,
-            top_k=3,
         )
         top_utility_by_batch[batch_size] = _build_top_raw_configs(
             utility_rows,
@@ -504,11 +488,10 @@ def main() -> None:
     )
     print()
     print(
-        format_module_combo_extremes_table(
-            lowest_by_batch,
-            highest_by_batch,
+        format_module_combo_ranking_table(
+            module_rankings_by_batch,
             dataset_name=dataset_name,
-            label_suffix=f"{dataset_slug}-module-extremes",
+            label_suffix=f"{dataset_slug}-module-ranking",
             decimals=args.decimals,
         )
     )
