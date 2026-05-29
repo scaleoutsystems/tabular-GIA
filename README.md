@@ -7,6 +7,15 @@ This is the repository for the paper *Profiling Privacy Preservation Under Gradi
 This section describes how to install the code and run the experiments used in the paper.
 
 ### Install dependencies
+For GPU support, install a CUDA-enabled PyTorch build first. For example:
+```bash
+pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+```
+Then install the repository dependencies:
+```bash
+pip install -r requirements.txt
+```
+For CPU-only installation, run only:
 ```bash
 pip install -r requirements.txt
 ```
