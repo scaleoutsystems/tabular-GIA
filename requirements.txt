@@ -1,0 +1,3 @@
+-e .[federated]
+rtdl_revisiting_models
+huggingface_hub[cli]

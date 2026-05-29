@@ -8,11 +8,11 @@ This section describes how to install the code and run the experiments used in t
 
 ### Install dependencies
 ```bash
-pip install -e .[dev]
+pip install -r requirements.txt
 ```
 
 ### Data
-Datasets are not committed to this repository. Download the Adult or California Housing dataset. 
+Datasets are not committed to this repository. Download the Adult or California Housing dataset.
 ```bash
 cd tabular_gia
 ```
@@ -27,7 +27,7 @@ python data/download_california_housing.py
 ```
 
 ### Restricted data
-MIMIC-IV requires credentialed PhysioNet access. The private multiclass benchmark used in the paper is not publicly released.
+MIMIC-IV requires credentialed PhysioNet access. Restricted datasets are not redistributed in this repository.
 
 ## Configuration
 Make sure the config files in `configs/`:
