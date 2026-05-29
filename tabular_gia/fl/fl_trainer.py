@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from configs.fl.fedavg import FedAvgConfig
 from configs.fl.fedsgd import FedSGDConfig
 from fl.metrics.fl_metrics import eval, progress_write, round_bar
-from fl.fl_optimizers import FLAdam, FLOptimizer, FLSGD
+from fl.fl_optimizers import FLOptimizer, FLSGD
 from leakpro.fl_utils.gia_module_to_functional import MetaModule
 from leakpro.fl_utils.model_mode_utils import bn_eval_mode
 
@@ -33,6 +33,9 @@ class FLTrainResult:
 class FLCallbacks:
     attack_init_fn: Callable[[int], None] | None
     attack_fn: Callable[..., None] | None
+    attack_mode: str = "round_checkpoint"
+    fixed_batch_k: int = 1
+    attack_seed: int = 0
 
 
 class FLTrainer:
@@ -289,9 +292,71 @@ class FedAvgTrainer(FLTrainer):
     def _build_fl_optimizer(self, optimizer_name: str, lr: float) -> FLOptimizer:
         if optimizer_name == "MetaSGD":
             return FLSGD(lr=lr)
-        if optimizer_name == "MetaAdam":
-            return FLAdam(lr=lr)
         raise ValueError(f"Unsupported optimizer '{optimizer_name}' for FedAvgTrainer.train_fast")
+
+    def train_fast_vectorized(
+        self,
+        model,
+        inputs_by_client: torch.Tensor,
+        labels_by_client: torch.Tensor,
+        criterion,
+        epochs: int,
+        client_batch_size: int,
+        lr: float,
+    ) -> list[torch.Tensor | None]:
+        """Vectorized FedAvg local-SGD updates across clients."""
+        gpu_or_cpu = next(model.parameters()).device
+        model.to(gpu_or_cpu)
+        named_params = list(model.named_parameters())
+        trainable_pos = [idx for idx, (_, p) in enumerate(named_params) if p.requires_grad]
+        num_params = len(named_params)
+        if not trainable_pos:
+            return [None for _ in range(num_params)]
+
+        num_clients = int(inputs_by_client.shape[0])
+        trainable_names = [named_params[idx][0] for idx in trainable_pos]
+        base_trainable = tuple(named_params[idx][1].detach().to(gpu_or_cpu) for idx in trainable_pos)
+        client_params: tuple[torch.Tensor, ...] = tuple(
+            p.unsqueeze(0).expand(num_clients, *p.shape).clone().detach().requires_grad_(p.requires_grad)
+            for p in base_trainable
+        )
+        frozen_params = OrderedDict((name, p) for idx, (name, p) in enumerate(named_params) if idx not in trainable_pos)
+        buffers = OrderedDict(model.named_buffers())
+
+        def loss_for_client(
+            client_trainable_values: tuple[torch.Tensor, ...],
+            x_c: torch.Tensor,
+            y_c: torch.Tensor,
+        ) -> torch.Tensor:
+            state = OrderedDict(zip(trainable_names, client_trainable_values))
+            state.update(frozen_params)
+            state.update(buffers)
+            out = functional_call(model, state, (x_c,))
+            return criterion(out, y_c).sum()
+
+        grad_fn = func_grad(loss_for_client)
+        rows_per_client = int(inputs_by_client.shape[1])
+        step_size = max(1, int(client_batch_size))
+        with bn_eval_mode(model):
+            for _ in range(epochs):
+                for start in range(0, rows_per_client, step_size):
+                    end = min(rows_per_client, start + step_size)
+                    x_mb = inputs_by_client[:, start:end]
+                    y_mb = labels_by_client[:, start:end]
+                    grads_by_client = vmap(
+                        grad_fn,
+                        in_dims=(0, 0, 0),
+                        randomness="different",
+                    )(client_params, x_mb, y_mb)
+                    client_params = tuple(
+                        (param_stack - (lr * grad_stack)).detach().requires_grad_(param_stack.requires_grad)
+                        for param_stack, grad_stack in zip(client_params, grads_by_client)
+                    )
+
+        deltas: list[torch.Tensor | None] = [None for _ in range(num_params)]
+        for pos, updated_stack, base in zip(trainable_pos, client_params, base_trainable):
+            deltas[pos] = (updated_stack - base.unsqueeze(0)).detach()
+        return deltas
 
     def train_fast(
         self,
@@ -355,6 +420,32 @@ class FedAvgTrainer(FLTrainer):
                     agg.add_(delta.detach().to(param.device, dtype=param.dtype), alpha=(weight / total_weight))
                 param.add_(agg)
 
+    def _fedavg_train_vectorized(self, global_model, client_deltas, client_weights):
+        if not client_deltas:
+            return
+        if not client_weights:
+            return
+
+        params = list(global_model.parameters())
+        num_params = len(params)
+        if len(client_deltas) != num_params:
+            raise ValueError("Vectorized client deltas do not match model parameters.")
+        n_clients = len(client_weights)
+        total_weight = float(sum(client_weights)) or 1.0
+        with torch.no_grad():
+            for idx, param in enumerate(params):
+                if not param.requires_grad:
+                    continue
+                delta_stack = client_deltas[idx]
+                if delta_stack is None:
+                    continue
+                if int(delta_stack.shape[0]) != int(n_clients):
+                    raise ValueError("Vectorized client delta stack does not match client weight count.")
+                weights = torch.as_tensor(client_weights, device=delta_stack.device, dtype=delta_stack.dtype)
+                shape = (n_clients,) + (1,) * (delta_stack.dim() - 1)
+                weighted = (delta_stack * weights.view(shape)).sum(dim=0) / total_weight
+                param.add_(weighted.detach().to(param.device, dtype=param.dtype))
+
     def fit(self, model_wrapper) -> FLTrainResult:
         self._set_model(model_wrapper)
         cfg = self.fl_cfg
@@ -365,6 +456,9 @@ class FedAvgTrainer(FLTrainer):
         batch_size = self.batch_size
         lr = cfg.lr
         optimizer_name = cfg.optimizer
+        use_vectorized_clients = cfg.vectorized_clients
+        if optimizer_name != "MetaSGD":
+            raise ValueError(f"Only MetaSGD/FLSGD is supported for FedAvg, got optimizer='{optimizer_name}'.")
         num_clients = len(self.client_dataloaders)
 
         client_n_eff = self._client_effective_sizes(batch_size)
@@ -390,13 +484,14 @@ class FedAvgTrainer(FLTrainer):
             samples_per_round,
         )
         logger.info(
-            "FL runtime settings (FedAvg): local_steps=%s local_epochs=%d optimizer=%s lr=%.6g batch_size=%d clients=%d",
+            "FL runtime settings (FedAvg): local_steps=%s local_epochs=%d optimizer=%s lr=%.6g batch_size=%d clients=%d vectorized_clients=%s",
             "all" if local_steps_all else str(local_steps),
             local_epochs,
             optimizer_name,
             lr,
             batch_size,
             num_clients,
+            use_vectorized_clients,
         )
 
         model = self.model
@@ -427,34 +522,108 @@ class FedAvgTrainer(FLTrainer):
 
                 client_updates = []
                 attack_payloads = [] if self.callbacks.attack_fn is not None else None
-                for client_idx in active_list:
-                    if local_steps_all:
-                        batches = list(iter(self.client_dataloaders[client_idx]))
+                client_deltas_stacked = None
+                vectorized_this_round = False
+                vectorized_client_weights: list[int] = []
+                prefetched_client_data: list[tuple[int, torch.Tensor, torch.Tensor, int]] = []
+                if use_vectorized_clients:
+                    per_client_inputs: list[torch.Tensor] = []
+                    per_client_labels: list[torch.Tensor] = []
+                    per_client_loaders: list[DataLoader] | None = [] if attack_payloads is not None else None
+                    per_client_ids: list[int] = []
+                    same_batch_size = True
+                    expected_rows = None
+                    for client_idx in active_list:
+                        if local_steps_all:
+                            batches = list(iter(self.client_dataloaders[client_idx]))
+                        else:
+                            batches = []
+                            for _ in range(local_steps):
+                                batches.append(next_batch(client_idx))
+
+                        inputs_cat = torch.cat([b[0] for b in batches], dim=0)
+                        labels_cat = torch.cat([b[1] for b in batches], dim=0)
+                        rows = int(inputs_cat.shape[0])
+                        if expected_rows is None:
+                            expected_rows = rows
+                        elif rows != expected_rows:
+                            same_batch_size = False
+                        samples_seen = len(labels_cat) * local_epochs
+                        examples_seen[client_idx] += samples_seen
+                        vectorized_client_weights.append(int(samples_seen))
+                        prefetched_client_data.append((int(client_idx), inputs_cat, labels_cat, int(samples_seen)))
+                        per_client_inputs.append(inputs_cat)
+                        per_client_labels.append(labels_cat)
+                        if per_client_loaders is not None:
+                            batch_ds = TensorDataset(inputs_cat, labels_cat)
+                            per_client_loaders.append(DataLoader(batch_ds, batch_size=batch_size, shuffle=False))
+                        per_client_ids.append(int(client_idx))
+
+                    if same_batch_size and per_client_inputs:
+                        gpu_or_cpu = next(model.parameters()).device
+                        inputs_by_client = torch.stack(per_client_inputs, dim=0).to(gpu_or_cpu, non_blocking=True)
+                        labels_by_client = torch.stack(per_client_labels, dim=0).to(gpu_or_cpu, non_blocking=True)
+                        client_deltas_stacked = self.train_fast_vectorized(
+                            model=model,
+                            inputs_by_client=inputs_by_client,
+                            labels_by_client=labels_by_client,
+                            criterion=criterion,
+                            epochs=local_epochs,
+                            client_batch_size=batch_size,
+                            lr=lr,
+                        )
+
+                        first_delta = next((d for d in client_deltas_stacked if d is not None), None)
+                        n_client = int(first_delta.shape[0]) if first_delta is not None else len(active_list)
+                        num_params = len(client_deltas_stacked)
+                        for c_idx in range(n_client):
+                            deltas_full: list[torch.Tensor | None] = [None for _ in range(num_params)]
+                            for p_idx, delta in enumerate(client_deltas_stacked):
+                                if delta is not None:
+                                    deltas_full[p_idx] = delta[c_idx].detach()
+                            client_updates.append((deltas_full, vectorized_client_weights[c_idx]))
+                            if attack_payloads is not None:
+                                attack_payloads.append(
+                                    (
+                                        per_client_loaders[c_idx],  # type: ignore[index]
+                                        per_client_ids[c_idx],
+                                        deltas_full,
+                                    )
+                                )
+                        vectorized_this_round = True
+
+                if not vectorized_this_round:
+                    if prefetched_client_data:
+                        client_batches = prefetched_client_data
                     else:
-                        batches = []
-                        for _ in range(local_steps):
-                            batches.append(next_batch(client_idx))
+                        client_batches = []
+                        for client_idx in active_list:
+                            if local_steps_all:
+                                batches = list(iter(self.client_dataloaders[client_idx]))
+                            else:
+                                batches = []
+                                for _ in range(local_steps):
+                                    batches.append(next_batch(client_idx))
+                            inputs_cat = torch.cat([b[0] for b in batches], dim=0)
+                            labels_cat = torch.cat([b[1] for b in batches], dim=0)
+                            samples_seen = len(labels_cat) * local_epochs
+                            examples_seen[client_idx] += samples_seen
+                            client_batches.append((int(client_idx), inputs_cat, labels_cat, int(samples_seen)))
 
-                    inputs_cat = torch.cat([b[0] for b in batches], dim=0)
-                    labels_cat = torch.cat([b[1] for b in batches], dim=0)
-
-                    batch_ds = TensorDataset(inputs_cat, labels_cat)
-                    batch_loader = DataLoader(batch_ds, batch_size=batch_size, shuffle=False)
-                    samples_seen = len(labels_cat) * local_epochs
-                    examples_seen[client_idx] += samples_seen
-
-                    fl_optimizer = self._build_fl_optimizer(optimizer_name=optimizer_name, lr=lr)
-                    deltas = self.train_fast(
-                        model=model,
-                        data=batch_loader,
-                        optimizer=fl_optimizer,
-                        criterion=criterion,
-                        epochs=local_epochs,
-                    )
-
-                    client_updates.append((deltas, samples_seen))
-                    if attack_payloads is not None:
-                        attack_payloads.append((batch_loader, client_idx, deltas))
+                    for client_idx, inputs_cat, labels_cat, samples_seen in client_batches:
+                        batch_ds = TensorDataset(inputs_cat, labels_cat)
+                        batch_loader = DataLoader(batch_ds, batch_size=batch_size, shuffle=False)
+                        fl_optimizer = self._build_fl_optimizer(optimizer_name=optimizer_name, lr=lr)
+                        deltas = self.train_fast(
+                            model=model,
+                            data=batch_loader,
+                            optimizer=fl_optimizer,
+                            criterion=criterion,
+                            epochs=local_epochs,
+                        )
+                        client_updates.append((deltas, samples_seen))
+                        if attack_payloads is not None:
+                            attack_payloads.append((batch_loader, client_idx, deltas))
 
                 current_exposures, exp_min_curr, exp_avg_curr, exp_max_curr = self._exposure_stats(examples_seen, client_n_eff)
                 crossed_val_checkpoint, next_val_exposure = self._next_val_checkpoint( float(exp_min_prev), float(next_val_exposure), float(exp_min_curr))
@@ -472,7 +641,10 @@ class FedAvgTrainer(FLTrainer):
                         exp_max=float(exp_max_prev),
                     )
 
-                self._fedavg_train(model, client_updates)
+                if vectorized_this_round and client_deltas_stacked is not None:
+                    self._fedavg_train_vectorized(model, client_deltas_stacked, vectorized_client_weights)
+                else:
+                    self._fedavg_train(model, client_updates)
 
                 exp_min_prev = exp_min_curr
                 exp_avg_prev = exp_avg_curr
@@ -676,6 +848,26 @@ class FedSGDTrainer(FLTrainer):
         exp_avg_prev = 0.0
         exp_max_prev = 0.0
         use_vectorized_clients = cfg.vectorized_clients
+        attack_mode = self.callbacks.attack_mode.strip().lower()
+        fixed_batch_k = max(1, int(self.callbacks.fixed_batch_k))
+        fixed_batch_loaders: dict[int, list[DataLoader]] = {}
+        if self.callbacks.attack_fn is not None and attack_mode == "fixed_batch":
+            base_seed = int(self.callbacks.attack_seed)
+            for client_idx, client_loader in enumerate(self.client_dataloaders):
+                loader_batch_size = int(client_loader.batch_size)
+                num_effective = int(len(client_loader) * loader_batch_size)
+                generator = torch.Generator()
+                generator.manual_seed(base_seed + (client_idx * 1_000_003))
+                perm = torch.randperm(num_effective, generator=generator).tolist()
+                selected = perm[: fixed_batch_k * loader_batch_size]
+                x_all, y_all = client_loader.dataset.tensors
+                client_fixed_loaders: list[DataLoader] = []
+                for fixed_batch_id in range(fixed_batch_k):
+                    sample_ids = selected[fixed_batch_id * loader_batch_size : (fixed_batch_id + 1) * loader_batch_size]
+                    idx = torch.as_tensor(sample_ids, dtype=torch.long)
+                    fixed_ds = TensorDataset(x_all.index_select(0, idx), y_all.index_select(0, idx))
+                    client_fixed_loaders.append(DataLoader(fixed_ds, batch_size=len(fixed_ds), shuffle=False))
+                fixed_batch_loaders[client_idx] = client_fixed_loaders
 
         def next_batch(client_idx: int):
             try:
@@ -798,18 +990,74 @@ class FedSGDTrainer(FLTrainer):
                     float(next_val_exposure),
                     float(exp_min_curr),
                 )
-                if self.callbacks.attack_fn is not None and attack_payloads is not None:
-                    self.callbacks.attack_fn(
-                        model=self.model,
-                        round_idx=int(round_idx),
-                        attack_payloads=attack_payloads,
-                        exp_min_prev=float(exp_min_prev),
-                        exp_min_curr=float(exp_min_curr),
-                        current_exposures=current_exposures,
-                        exp_min=float(exp_min_prev),
-                        exp_avg=float(exp_avg_prev),
-                        exp_max=float(exp_max_prev),
-                    )
+                if self.callbacks.attack_fn is not None:
+                    if attack_mode == "fixed_batch":
+                        for fixed_batch_id in range(fixed_batch_k):
+                            fixed_payloads: list[tuple[DataLoader, int]] = []
+                            per_client_inputs: list[torch.Tensor] = []
+                            per_client_labels: list[torch.Tensor] = []
+                            expected_rows: int | None = None
+                            for client_idx in active_list:
+                                fixed_batch_loader = fixed_batch_loaders[client_idx][fixed_batch_id]
+                                xb = torch.cat([batch[0] for batch in fixed_batch_loader], dim=0)
+                                yb = torch.cat([batch[1] for batch in fixed_batch_loader], dim=0)
+                                rows = int(xb.shape[0])
+                                if expected_rows is None:
+                                    expected_rows = rows
+                                elif rows != expected_rows:
+                                    raise ValueError(
+                                        "Vectorized fixed-batch attack requires same number of rows per client batch."
+                                    )
+                                fixed_payloads.append((fixed_batch_loader, int(client_idx)))
+                                per_client_inputs.append(xb)
+                                per_client_labels.append(yb)
+
+                            gpu_or_cpu = next(model.parameters()).device
+                            inputs_by_client = torch.stack(per_client_inputs, dim=0).to(gpu_or_cpu, non_blocking=True)
+                            labels_by_client = torch.stack(per_client_labels, dim=0).to(gpu_or_cpu, non_blocking=True)
+                            vectorized_loader = DataLoader(
+                                TensorDataset(inputs_by_client, labels_by_client),
+                                batch_size=int(inputs_by_client.shape[0]),
+                                shuffle=False,
+                            )
+                            fixed_gradients = self.train_nostep_fast_vectorized(
+                                model=model,
+                                data=vectorized_loader,
+                                criterion=criterion,
+                                epochs=local_epochs,
+                            )
+                            num_params = len(fixed_gradients)
+                            fixed_attack_payloads: list[tuple[DataLoader, int, list[torch.Tensor | None]]] = []
+                            for c_idx, (fixed_batch_loader, client_idx) in enumerate(fixed_payloads):
+                                grads_full: list[torch.Tensor | None] = [None for _ in range(num_params)]
+                                for p_idx, gradient in enumerate(fixed_gradients):
+                                    if gradient is not None:
+                                        grads_full[p_idx] = gradient[c_idx].detach()
+                                fixed_attack_payloads.append((fixed_batch_loader, client_idx, grads_full))
+                            self.callbacks.attack_fn(
+                                model=self.model,
+                                round_idx=int(round_idx),
+                                attack_payloads=fixed_attack_payloads,
+                                exp_min_prev=float(exp_min_prev),
+                                exp_min_curr=float(exp_min_curr),
+                                current_exposures=current_exposures,
+                                exp_min=float(exp_min_prev),
+                                exp_avg=float(exp_avg_prev),
+                                exp_max=float(exp_max_prev),
+                                fixed_batch_id=int(fixed_batch_id),
+                            )
+                    elif attack_payloads is not None:
+                        self.callbacks.attack_fn(
+                            model=self.model,
+                            round_idx=int(round_idx),
+                            attack_payloads=attack_payloads,
+                            exp_min_prev=float(exp_min_prev),
+                            exp_min_curr=float(exp_min_curr),
+                            current_exposures=current_exposures,
+                            exp_min=float(exp_min_prev),
+                            exp_avg=float(exp_avg_prev),
+                            exp_max=float(exp_max_prev),
+                        )
 
                 if vectorized_this_round and client_gradients is not None:
                     self._fedsgd_train_vectorized(model, client_gradients, lr)

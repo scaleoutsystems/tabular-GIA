@@ -10,6 +10,7 @@ class FedAvgConfig:
     min_exposure: float = 25.0 # stop when least-exposed client reaches this effective pass count
     optimizer: str = "MetaSGD"
     lr: float = 0.01
+    vectorized_clients: bool = True
 
     def to_dict(self) -> dict:
         return asdict(self)

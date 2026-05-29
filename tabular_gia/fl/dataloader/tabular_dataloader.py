@@ -410,6 +410,26 @@ def _split_clients_iid(
     return client_splits
 
 
+def _make_regression_dirichlet_labels(
+    y_train: pd.Series,
+    n_bins: int,
+) -> pd.Series:
+    if n_bins < 2:
+        raise ValueError(f"regression_dirichlet_bins must be >= 2, got {n_bins}")
+
+    y_num = pd.to_numeric(y_train, errors="raise")
+    unique_count = int(pd.Series(y_num).nunique(dropna=True))
+    if unique_count < 2:
+        raise ValueError("Regression Dirichlet partitioning requires at least two unique target values.")
+
+    q = min(int(n_bins), unique_count)
+    labels = pd.qcut(y_num, q=q, labels=False, duplicates="drop")
+    labels = pd.Series(labels, index=y_train.index)
+    if labels.isna().any():
+        raise ValueError("Regression Dirichlet partitioning produced missing bucket labels.")
+    return labels.astype(int)
+
+
 def _split_clients_dirichlet(
     X_train: pd.DataFrame,
     y_train: pd.Series,
@@ -418,6 +438,7 @@ def _split_clients_dirichlet(
     alpha: float,
     min_client_samples: int = 1,
     max_attempts: int = 50,
+    partition_labels: pd.Series | None = None,
 ) -> list[tuple[pd.DataFrame, pd.Series]]:
     if num_clients == 1:
         return [(X_train, y_train)]
@@ -425,7 +446,10 @@ def _split_clients_dirichlet(
         raise ValueError(f"dirichlet_alpha must be > 0, got {alpha}")
 
     rng = np.random.default_rng(seed)
-    y_codes = pd.Categorical(y_train, ordered=False).codes
+    labels = y_train if partition_labels is None else partition_labels
+    if len(labels) != len(y_train):
+        raise ValueError("partition_labels must have the same length as y_train.")
+    y_codes = pd.Categorical(pd.Series(labels).reset_index(drop=True), ordered=False).codes
     num_classes = int(np.max(y_codes)) + 1 if len(y_codes) > 0 else 0
 
     for _ in range(max_attempts):
@@ -746,25 +770,31 @@ def load_dataset(
     if partition_strategy == "iid":
         client_splits = _split_clients_iid(X_train, y_train, num_clients, task, seed)
     elif partition_strategy == "dirichlet":
-        if task not in ("binary", "multiclass"):
-            logger.warning(
-                "Dirichlet partition requested for task=%s. Falling back to IID split.",
-                task,
+        dirichlet_alpha = dataset_cfg.dirichlet_alpha
+        min_client_samples = dataset_cfg.min_client_samples
+        max_attempts = dataset_cfg.dirichlet_max_attempts
+        partition_labels = None
+        if task == "regression":
+            bins_cfg = dataset_cfg.regression_dirichlet_bins
+            n_bins = num_clients if str(bins_cfg).strip().lower() == "num_clients" else int(bins_cfg)
+            partition_labels = _make_regression_dirichlet_labels(y_train, n_bins=n_bins)
+            logger.info(
+                "Regression Dirichlet partitioning: alpha=%s bins=%d effective_bins=%d",
+                dirichlet_alpha,
+                n_bins,
+                int(pd.Series(partition_labels).nunique(dropna=True)),
             )
-            client_splits = _split_clients_iid(X_train, y_train, num_clients, task, seed)
-        else:
-            dirichlet_alpha = dataset_cfg.dirichlet_alpha
-            min_client_samples = dataset_cfg.min_client_samples
-            max_attempts = dataset_cfg.dirichlet_max_attempts
-            client_splits = _split_clients_dirichlet(
-                X_train,
-                y_train,
-                num_clients,
-                seed=seed,
-                alpha=dirichlet_alpha,
-                min_client_samples=min_client_samples,
-                max_attempts=max_attempts,
-            )
+
+        client_splits = _split_clients_dirichlet(
+            X_train,
+            y_train,
+            num_clients,
+            seed=seed,
+            alpha=dirichlet_alpha,
+            min_client_samples=min_client_samples,
+            max_attempts=max_attempts,
+            partition_labels=partition_labels,
+        )
     else:
         raise ValueError(f"Unknown partition_strategy '{partition_strategy}'. Use 'iid' or 'dirichlet'.")
 

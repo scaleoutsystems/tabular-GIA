@@ -163,6 +163,9 @@ class RunEngine:
         callbacks = FLCallbacks(
             attack_init_fn=attack_engine.on_attack_init,
             attack_fn=attack_engine.on_attack,
+            attack_mode=self.config.gia_cfg.attack_mode,
+            fixed_batch_k=self.config.gia_cfg.fixed_batch_k,
+            attack_seed=self.config.base_cfg.seed,
         )
         return callbacks, summary_builder, csv_sink, attack_engine
 

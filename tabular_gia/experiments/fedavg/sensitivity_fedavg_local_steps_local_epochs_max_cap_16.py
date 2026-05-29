@@ -1,3 +1,4 @@
+# tabular_gia/experiments/experiment_template.py
 from typing import Any
 
 from experiments.sweep_runner import SweepExperimentRunner
@@ -10,16 +11,16 @@ def build_sweep_cfg() -> dict[str, Any]:
             "seed": 42,
         },
         "grid": {
-            "protocol": "fedsgd",
-            "seed": [7, 13, 42],
+            "protocol": "fedavg",
+            "seed": [0, 1, 7, 13, 42],
         },
     }
 
     dataset = {
         "default": {
             "dataset_path_and_meta_path": [
-                "data/binary/adult/adult.csv",
-                "data/binary/adult/adult.yaml",
+                "data/regression/california_housing/california_housing.csv",
+                "data/regression/california_housing/california_housing.yaml",
             ],
             "num_workers": 0,
             "pin_memory": True,
@@ -36,23 +37,11 @@ def build_sweep_cfg() -> dict[str, Any]:
         "grid": {
             "dataset_path_and_meta_path": [
                 [
-                    "data/binary/adult/adult.csv",
-                    "data/binary/adult/adult.yaml",
-                ],
-                [
-                    "data/multiclass/pandemic_movement_office/pandemic_movement_office.csv",
-                    "data/multiclass/pandemic_movement_office/pandemic_movement_office.yaml",
-                ],
-                [
-                    "data/regression/california_housing/california_housing.csv",
-                    "data/regression/california_housing/california_housing.yaml",
-                ],
-                [
                     "data/binary/mimic_admission_tier3_binary/mimic_admission_tier3_binary.train.csv",
                     "data/binary/mimic_admission_tier3_binary/mimic_admission_tier3_binary.yaml",
                 ],
             ],
-            "batch_size": [1,2,4,8,16,32,64,128,256]
+            "batch_size": [4,8,16],
         },
     }
 
@@ -121,8 +110,14 @@ def build_sweep_cfg() -> dict[str, Any]:
                 "min_exposure": 25.0,
                 "optimizer": "MetaSGD",
                 "lr": 0.01,
+                "vectorized_clients": True,
             },
-            "grid": {},
+            "grid": {
+                "min_exposure": 24.0,
+                "local_epochs": [1,2,4],
+                "max_client_dataset_examples": 16,
+
+            },
         },
     }
 
@@ -144,6 +139,8 @@ def build_sweep_cfg() -> dict[str, Any]:
         "grid": {
             # Nested key sweep example:
             # "invertingconfig": {"at_iterations": [100, 500, 1000]},
+            "attack_schedule": "exposure",
+            "attack_exposure_milestones": [[0.0, 24.0]],
         },
     }
 
@@ -156,7 +153,7 @@ def build_sweep_cfg() -> dict[str, Any]:
     }
 
 
-class FedSGDBatchSizesRunner(SweepExperimentRunner):
+class FedAvgLocalStepsLocalEpochsBatchSizesMaxCap16Runner(SweepExperimentRunner):
     def __init__(
         self,
         sweep_cfg,

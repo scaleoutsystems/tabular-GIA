@@ -670,7 +670,7 @@ def build_dataset(
             "categorical_columns": [c for c in categorical_cols if c in ref_model_cols],
         }
         if task == "binary":
-            meta["binary_pos_weight"] = 7
+            meta["binary_pos_weight"] = 13
         meta["has_val_split"] = out_val.name
         meta["has_test_split"] = out_test.name
     else:
@@ -748,7 +748,7 @@ def build_dataset(
             "has_test_split": None,
         }
         if task == "binary":
-            meta["binary_pos_weight"] = 7
+            meta["binary_pos_weight"] = 13
 
     with open(out_yaml, "w", encoding="utf-8") as f:
         yaml.safe_dump(meta, f, sort_keys=False)

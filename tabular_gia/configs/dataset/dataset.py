@@ -3,19 +3,18 @@ from typing import Literal
 
 
 PartitionStrategy = Literal["iid", "dirichlet"]
+MinClientSamples = int | Literal["batch_size"]
+RegressionDirichletBins = int | Literal["num_clients"]
 
 
 @dataclass
 class DatasetConfig:
     # dataset paths
-    #dataset_path: str = "data/binary/adult/adult.csv"
-    #dataset_meta_path: str = "data/binary/adult/adult.yaml"
+    dataset_path: str = "data/binary/adult/adult.csv"
+    dataset_meta_path: str = "data/binary/adult/adult.yaml"
 
-    #dataset_path: str = "data/multiclass/pandemic_movement_office/pandemic_movement_office.csv"
-    #dataset_meta_path: str = "data/multiclass/pandemic_movement_office/pandemic_movement_office.yaml"
-
-    dataset_path: str = "data/regression/california_housing/california_housing.csv"
-    dataset_meta_path: str = "data/regression/california_housing/california_housing.yaml"
+    #dataset_path: str = "data/regression/california_housing/california_housing.csv"
+    #dataset_meta_path: str = "data/regression/california_housing/california_housing.yaml"
 
     # dataloader gpu speedups
     num_workers: int = 0
@@ -31,7 +30,8 @@ class DatasetConfig:
     # client partitioning
     partition_strategy: PartitionStrategy = "iid" # iid | dirichlet
     dirichlet_alpha: float = 0.3
-    min_client_samples: int = 1
+    regression_dirichlet_bins: RegressionDirichletBins = "num_clients"
+    min_client_samples: MinClientSamples = 1
     dirichlet_max_attempts: int = 50
 
     def to_dict(self) -> dict:

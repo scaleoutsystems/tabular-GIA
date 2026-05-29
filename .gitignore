@@ -171,6 +171,12 @@ data/CINIC*
 attack_objects/
 coco2017
 COCO
+tabular_gia/data/**/*.csv
+tabular_gia/data/**/*.parquet
+tabular_gia/data/**/*.npy
+tabular_gia/data/**/*.npz
+tabular_gia/data/**/*.pt
+tabular_gia/data/**/*.pth
 
 # Ignore outputs
 leakpro_output

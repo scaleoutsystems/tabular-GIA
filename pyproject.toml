@@ -6,7 +6,7 @@ description = "A package for privacy risk analysis"
 authors = [{name = "LeakPro team", email = "johan.ostman@ai.se"}]
 readme = "README.md"
 license = {file="LICENSE"}
-requires-python = '>=3.8,<3.13'
+requires-python = ">=3.10,<3.13"
 
 dependencies = [
   "numpy",
@@ -48,7 +48,6 @@ dev = [
   "optuna", # federated and mia
   "kornia", # from minv
   "albumentations", # federated example
-  "transformers", # federated example
 ]
 
 [tool.setuptools]
@@ -60,7 +59,7 @@ include = ["leakpro*"]
 
 [tool.ruff]
 line-length = 130
-target-version = "py39"
+target-version = "py310"
 
 lint.select = [
   "ANN", "ARG", "B", "C4", "C90", "D", "DTZ", "E", "ERA", "F", "I", "N", "PD", "PGH", "PLC",

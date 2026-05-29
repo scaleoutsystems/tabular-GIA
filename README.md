@@ -1,39 +1,75 @@
-# tabular-GIA
+# Profiling Privacy Preservation Under Gradient Inversion Attacks in Tabular Federated Learning
 
-Focused repo for the tabular gradient inversion (GIA) implementation and evaluation.
+## Overview
+This is the repository for the paper *Profiling Privacy Preservation Under Gradient Inversion Attacks in Tabular Federated Learning*.
 
-## Setup
+## Installation
+This section describes how to install the code and run the experiments used in the paper.
+
+### Install dependencies
+For GPU support, install a CUDA-enabled PyTorch build first. For example:
 ```bash
-pip install -e .[dev]
+pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+```
+Then install the repository dependencies:
+```bash
+pip install -r requirements.txt
+```
+For CPU-only installation, run only:
+```bash
+pip install -r requirements.txt
 ```
 
-## Run the tabular GIA demo
+### Data
+Datasets are not committed to this repository. Download the Adult or California Housing dataset.
 ```bash
-python tabular_gia/main.py
+cd tabular_gia
+```
+Adult:
+```bash
+chmod +x download_datasets.sh
+./download_datasets.sh data
+```
+California Housing:
+```bash
+python data/download_california_housing.py
 ```
 
-This will load a checkpoint if present, otherwise train a model first.
-
-To explicitly train:
-```bash
-python tabular_gia/train.py
-```
+### Restricted data
+MIMIC-IV requires credentialed PhysioNet access. Restricted datasets are not redistributed in this repository.
 
 ## Configuration
-- `tabular_gia/config.yaml` controls dataset path, splits, batch size, and training settings.
-- Datasets live under `tabular_gia/data/...` (already included).
+Make sure the config files in `configs/`:
+- `base.py`
+- `dataset/dataset.py`
+- `fl/fedsgd.py`
+- `fl/fedavg.py`
+- `gia/gia.py`
+- `model/model.py`
 
-## Outputs
-- Per-run metrics and per-row comparisons are written to `tabular_gia/results.txt`.
-- Checkpoints are saved under `tabular_gia/data/<dataset>/checkpoints/`.
+Make sure the configs are set to what you want to run and that for instance the data path correctly points to the downloaded dataset(s). The generic `sweep` experiment uses `configs/sweep.yaml`.
 
-## Notes
-- The evaluation matches reconstructed rows to originals using Hungarian assignment before scoring.
-- Numerical features are z-score normalized; categoricals are one-hot encoded.
+## Running
+Run with the current config files:
+```bash
+python main.py
+```
+Outputs are written to `tabular_gia/results/`.
 
-## Restoring upstream LeakPro
-This repo intentionally prunes unrelated LeakPro components to keep the tabular GIA case small and reproducible.
-If you want the full LeakPro functionality later, you have two options:
 
-1) Replace the `leakpro/` folder with a fresh copy from the upstream LeakPro repo.
-2) Add upstream LeakPro as a submodule (or dependency) and adjust imports accordingly.
+### Experiments
+Values for `experiment_name` can be found in `tabular_gia/experiments/registry.py`. Configs are hardcoded in each experiment file.
+```bash
+python main.py --experiment [experiment_name]
+```
+
+for instance:
+```bash
+python main.py --experiment fedsgdbatchsizes
+```
+## Citation
+
+Citation information will be added after publication.
+
+## Authors
+See the manuscript for full authorship.
