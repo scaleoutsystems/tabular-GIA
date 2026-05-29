@@ -2,14 +2,30 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 import pandas as pd
 
 MODEL_CLEAN_NAMES = {
-    "fttransformer": "FTTransformer",
+    "fttransformer": "FT-Transformer",
     "resnet": "ResNet",
     "small": "Small MLP",
+}
+
+
+DATASET_CLEAN_NAMES = {
+    "adult": "Adult",
+    "california": "California Housing",
+    "california_housing": "California Housing",
+    "mimic": "MIMIC-IV",
+    "pandemic": "Private multiclass",
+}
+
+
+DATASET_LABEL_SLUGS = {
+    "the private multiclass benchmark": "private-multiclass-benchmark",
+    "Private multiclass": "private-multiclass",
 }
 
 
@@ -17,6 +33,9 @@ METRIC_ALIASES = {
     "reconstruction": "tableak_acc",
     "recon": "tableak_acc",
     "tableak": "tableak_acc",
+    "exact_match": "emr",
+    "exact_match_rate": "emr",
+    "strict_emr": "emr",
 }
 
 
@@ -25,14 +44,25 @@ def parse_args() -> argparse.Namespace:
         description="Print a LaTeX batch-size table from an aggregated batch-size experiment directory."
     )
     parser.add_argument(
-        "experiment_dir",
+        "experiment_dirs",
         type=Path,
+        nargs="+",
         help="Path to an experiment directory containing sweep_results.csv and sweep_runs.json.",
     )
     parser.add_argument(
         "--metric",
         default="tableak_acc",
-        help="Metric column from sweep_results.csv to print. Default: tableak_acc",
+        help="Metric column from rounds_summary_stats.csv to print. Default: tableak_acc",
+    )
+    parser.add_argument(
+        "--emr-table",
+        action="store_true",
+        help="Print the strict exact match rate table using the emr metric.",
+    )
+    parser.add_argument(
+        "--baseline-table",
+        action="store_true",
+        help="Print client marginal prior and uniform random reconstruction baselines by batch size.",
     )
     parser.add_argument(
         "--decimals",
@@ -121,11 +151,41 @@ def _load_checkpoint_summary_stats(experiment_dir: Path, metadata: pd.DataFrame,
     return pd.DataFrame(rows)
 
 
+def _load_baseline_rows(experiment_dir: Path, metadata: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for record in metadata.to_dict(orient="records"):
+        run_id = int(record["run_id"])
+        protocol = str(record["protocol"])
+        batch_size = int(record["batch_size"])
+        run_dir = experiment_dir / protocol / f"run_{run_id:04d}"
+        for summary_path in sorted(run_dir.glob("seed_*/artifacts/rounds_summary.csv")):
+            summary = pd.read_csv(summary_path)
+            expected_cols = {"prior_tableak_acc", "random_tableak_acc"}
+            missing_cols = expected_cols.difference(summary.columns)
+            if missing_cols:
+                raise ValueError(
+                    f"Missing columns {sorted(missing_cols)} in {summary_path}."
+                )
+            for summary_row in summary.to_dict(orient="records"):
+                rows.append(
+                    {
+                        "batch_size": batch_size,
+                        "prior_tableak_acc": float(summary_row["prior_tableak_acc"]),
+                        "random_tableak_acc": float(summary_row["random_tableak_acc"]),
+                    }
+                )
+    if not rows:
+        raise FileNotFoundError(
+            f"No per-seed rounds_summary.csv files found under {experiment_dir}."
+        )
+    return pd.DataFrame(rows)
+
+
 def _dataset_name_from_dir(experiment_dir: Path) -> str:
     name = experiment_dir.name
     for candidate in ("adult", "california", "pandemic", "mimic", "california_housing"):
         if candidate in name:
-            return candidate
+            return DATASET_CLEAN_NAMES[candidate]
     return name
 
 
@@ -138,6 +198,32 @@ def _ordered_models(model_names: list[str]) -> list[str]:
 
 def _clean_model_name(model_name: str) -> str:
     return MODEL_CLEAN_NAMES.get(model_name, model_name)
+
+
+def _label_slug(value: str) -> str:
+    if value in DATASET_LABEL_SLUGS:
+        return DATASET_LABEL_SLUGS[value]
+    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+
+
+def _default_caption(metric_name: str, dataset_name: str) -> str:
+    if metric_name == "emr":
+        return (
+            f"Strict exact match rate at the initialized and trained attack checkpoints for {dataset_name}. "
+            "EMR is the fraction of attacked rows reconstructed perfectly after assignment. "
+            "Each cell reports mean $\\pm$ standard deviation across 3 seeds."
+        )
+    if metric_name == "tableak_acc":
+        return (
+            f"Reconstruction accuracy at the initialized and trained attack checkpoints for {dataset_name}. "
+            "Initialized denotes the attack before any global model aggregation, and Trained denotes the final attacked checkpoint. "
+            "Each cell reports mean $\\pm$ standard deviation across 3 seeds."
+        )
+    metric_label = metric_name.replace("_", " ")
+    return (
+        f"{metric_label} at the initialized and trained attack checkpoints for {dataset_name}. "
+        "Each cell reports mean $\\pm$ standard deviation across 3 seeds."
+    )
 
 
 def build_table_frame(experiment_dir: Path, metric_name: str) -> pd.DataFrame:
@@ -153,6 +239,22 @@ def build_table_frame(experiment_dir: Path, metric_name: str) -> pd.DataFrame:
     ordered_cols = pd.MultiIndex.from_product([["metric_mean", "metric_std"], stage_order, ordered_models])
     pivot = pivot.reindex(index=ordered_batches, columns=ordered_cols)
     return pivot
+
+
+def build_baseline_table_frame(experiment_dir: Path) -> pd.DataFrame:
+    metadata = _load_run_metadata(experiment_dir)
+    rows = _load_baseline_rows(experiment_dir=experiment_dir, metadata=metadata)
+    grouped = (
+        rows.groupby("batch_size", as_index=True)
+        .agg(
+            prior_mean=("prior_tableak_acc", "mean"),
+            prior_std=("prior_tableak_acc", "std"),
+            random_mean=("random_tableak_acc", "mean"),
+            random_std=("random_tableak_acc", "std"),
+        )
+        .sort_index()
+    )
+    return grouped
 
 
 def format_latex_table(
@@ -216,23 +318,180 @@ def format_latex_table(
     return "\n".join(lines)
 
 
+def _default_baseline_caption(dataset_name: str) -> str:
+    return (
+        f"Client marginal prior and uniform random reconstruction baselines for {dataset_name} "
+        "in the FedSGD batch size experiment. Values are computed on the same model runs and attacked "
+        "checkpoints as the main reconstruction experiment and reported as mean $\\pm$ standard deviation."
+    )
+
+
+def _default_combined_baseline_caption() -> str:
+    return (
+        "Client marginal prior and uniform random reconstruction baselines for the benchmark "
+        "FedSGD batch size experiments. Values are computed on the same model runs and attacked "
+        "checkpoints as the main reconstruction experiments and reported as mean $\\pm$ standard deviation. "
+        "Prior denotes client marginal prior reconstruction accuracy, and Random denotes uniform random reconstruction accuracy."
+    )
+
+
+def format_baseline_latex_table(
+    frame: pd.DataFrame,
+    decimals: int,
+    caption: str | None,
+    label: str | None,
+) -> str:
+    lines: list[str] = []
+    if caption or label:
+        lines.append("\\begin{table}[t]")
+        lines.append("\\centering")
+        if caption:
+            lines.append(f"\\caption{{{caption}}}")
+        if label:
+            lines.append(f"\\label{{{label}}}")
+
+    lines.append("\\begin{tabular}{lcc}")
+    lines.append("\\hline")
+    lines.append(
+        "Batch size & Client marginal prior recon. acc. & Uniform random recon. acc. \\\\"
+    )
+    lines.append("\\hline")
+
+    for batch_size, row in frame.iterrows():
+        prior_value = f"{float(row['prior_mean']):.{decimals}f} $\\pm$ {float(row['prior_std']):.{decimals}f}"
+        random_value = f"{float(row['random_mean']):.{decimals}f} $\\pm$ {float(row['random_std']):.{decimals}f}"
+        lines.append(f"{int(batch_size)} & {prior_value} & {random_value} \\\\")
+
+    lines.append("\\hline")
+    lines.append("\\end{tabular}")
+
+    if caption or label:
+        lines.append("\\end{table}")
+
+    return "\n".join(lines)
+
+
+def format_combined_baseline_latex_table(
+    frames_by_dataset: list[tuple[str, pd.DataFrame]],
+    decimals: int,
+    caption: str | None,
+    label: str | None,
+) -> str:
+    all_batch_sizes = sorted(
+        {
+            int(batch_size)
+            for _dataset_name, frame in frames_by_dataset
+            for batch_size in frame.index.tolist()
+        }
+    )
+
+    lines: list[str] = []
+    if caption or label:
+        lines.append("\\begin{table}[t]")
+        lines.append("\\centering")
+        lines.append("\\small")
+        if caption:
+            lines.append(f"\\caption{{{caption}}}")
+        if label:
+            lines.append(f"\\label{{{label}}}")
+
+    lines.append("\\begin{tabular}{l" + "cc" * len(frames_by_dataset) + "}")
+    lines.append("\\hline")
+    header_top = "\\multicolumn{1}{l}{}"
+    for dataset_name, _frame in frames_by_dataset:
+        header_top += f" & \\multicolumn{{2}}{{c}}{{{dataset_name}}}"
+    header_top += " \\\\"
+    lines.append(header_top)
+
+    header = "Batch size"
+    for _dataset_name, _frame in frames_by_dataset:
+        header += " & Prior & Random"
+    header += " \\\\"
+    lines.append(header)
+    lines.append("\\hline")
+
+    for batch_size in all_batch_sizes:
+        values: list[str] = []
+        for _dataset_name, frame in frames_by_dataset:
+            if batch_size not in frame.index:
+                values.extend(["--", "--"])
+                continue
+            row = frame.loc[batch_size]
+            values.append(
+                f"{float(row['prior_mean']):.{decimals}f} $\\pm$ {float(row['prior_std']):.{decimals}f}"
+            )
+            values.append(
+                f"{float(row['random_mean']):.{decimals}f} $\\pm$ {float(row['random_std']):.{decimals}f}"
+            )
+        lines.append(f"{batch_size} & " + " & ".join(values) + " \\\\")
+
+    lines.append("\\hline")
+    lines.append("\\end{tabular}")
+
+    if caption or label:
+        lines.append("\\end{table}")
+
+    return "\n".join(lines)
+
+
 def main() -> None:
     args = parse_args()
-    experiment_dir = args.experiment_dir.resolve()
-    metric_name = _resolve_metric_name(args.metric)
+    experiment_dirs = [experiment_dir.resolve() for experiment_dir in args.experiment_dirs]
+    if len(experiment_dirs) > 1 and not args.baseline_table:
+        raise ValueError("Multiple experiment directories are only supported with --baseline-table.")
+    experiment_dir = experiment_dirs[0]
+    metric_name = "emr" if args.emr_table else _resolve_metric_name(args.metric)
+    dataset_name = args.dataset_name or _dataset_name_from_dir(experiment_dir)
+
+    if args.baseline_table:
+        if len(experiment_dirs) > 1:
+            if args.dataset_name:
+                raise ValueError("--dataset-name is only supported with a single experiment directory.")
+            frames_by_dataset = [
+                (_dataset_name_from_dir(path), build_baseline_table_frame(experiment_dir=path))
+                for path in experiment_dirs
+            ]
+            caption = args.caption
+            if caption is None:
+                caption = _default_combined_baseline_caption()
+            label = args.label
+            if label is None:
+                label = "tab:batch-size-benchmark-baseline-reference"
+            print(
+                format_combined_baseline_latex_table(
+                    frames_by_dataset=frames_by_dataset,
+                    decimals=args.decimals,
+                    caption=caption,
+                    label=label,
+                )
+            )
+            return
+
+        frame = build_baseline_table_frame(experiment_dir=experiment_dir)
+        caption = args.caption
+        if caption is None:
+            caption = _default_baseline_caption(dataset_name=dataset_name)
+        label = args.label
+        if label is None:
+            label = f"tab:batch-size-{_label_slug(dataset_name)}-baseline-reference"
+        print(
+            format_baseline_latex_table(
+                frame=frame,
+                decimals=args.decimals,
+                caption=caption,
+                label=label,
+            )
+        )
+        return
 
     frame = build_table_frame(experiment_dir=experiment_dir, metric_name=metric_name)
-    dataset_name = args.dataset_name or _dataset_name_from_dir(experiment_dir)
     caption = args.caption
     if caption is None:
-        caption = (
-            f"Reconstruction accuracy at the initialized and trained attack checkpoints for {dataset_name}. "
-            f"Initialized denotes the attack before any global model aggregation, and Trained denotes the final attacked checkpoint. "
-            f"Each cell reports mean $\\pm$ standard deviation across 3 seeds."
-        )
+        caption = _default_caption(metric_name=metric_name, dataset_name=dataset_name)
     label = args.label
     if label is None:
-        label = f"tab:batch-size-{dataset_name}-{metric_name.replace('_', '-')}"
+        metric_slug = "strict-emr" if metric_name == "emr" else metric_name.replace("_", "-")
+        label = f"tab:batch-size-{_label_slug(dataset_name)}-{metric_slug}"
 
     print(
         format_latex_table(

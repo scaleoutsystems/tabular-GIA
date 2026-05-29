@@ -1,4 +1,4 @@
-Download the datasets given the shell script download_datasets.sh
+Download the Adult dataset using the shell script download_datasets.sh.
 
 How to use shell script:
 

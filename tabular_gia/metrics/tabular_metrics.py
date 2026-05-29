@@ -682,21 +682,11 @@ def write_debug_reconstruction_txt(
     per_row_acc = np.asarray(per_row_metrics["tableak_acc"], dtype=float)
 
     total_dim = orig_tensor.shape[1]
+    encoding_mode = str(feature_schema["encoding_mode"]).strip().lower()
     orig_num_raw = orig_tensor[:, :num_count].numpy() if num_count > 0 else np.zeros((orig_tensor.shape[0], 0), dtype=np.float32)
     recon_num_raw = recon_tensor[:, :num_count].numpy() if num_count > 0 else np.zeros((orig_tensor.shape[0], 0), dtype=np.float32)
 
-    cat_groups: list[dict] = []
-    current_idx = num_count
-    for col in cat_cols:
-        cats = cat_categories[col]
-        n_cats = len(cats)
-        if current_idx + n_cats <= total_dim and n_cats > 0:
-            cat_groups.append({"name": col, "indices": list(range(current_idx, current_idx + n_cats)), "cats": cats})
-            current_idx += n_cats
-        else:
-            if current_idx < total_dim:
-                cat_groups.append({"name": col, "indices": [current_idx], "cats": cats})
-                current_idx += 1
+    cat_groups = _iter_cat_groups(feature_schema, total_dim, num_count)
 
     with open(results_path, "w", encoding="utf-8") as f:
         for row_idx in range(orig_tensor.shape[0]):
@@ -714,8 +704,11 @@ def write_debug_reconstruction_txt(
                 idxs = group["indices"]
                 cats = group["cats"]
                 if len(idxs) == 1:
-                    true_code = int(round(orig_tensor[row_idx, idxs[0]].item()))
-                    pred_code = int(round(recon_tensor[row_idx, idxs[0]].item()))
+                    true_code = int(np.rint(orig_tensor[row_idx, idxs[0]].item()))
+                    pred_code = int(np.rint(recon_tensor[row_idx, idxs[0]].item()))
+                    if encoding_mode == "ordinal" and cats:
+                        true_code = int(np.clip(true_code, 0, len(cats) - 1))
+                        pred_code = int(np.clip(pred_code, 0, len(cats) - 1))
                 else:
                     true_code = int(torch.argmax(orig_tensor[row_idx, idxs]).item())
                     pred_code = int(torch.argmax(recon_tensor[row_idx, idxs]).item())
