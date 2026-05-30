@@ -5,7 +5,6 @@ from typing import BinaryIO, List, Union
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
-from transformers import LongformerTokenizerFast
 
 
 def validate_tokens(original_dataloader: DataLoader, recreated_dataloader: DataLoader, name: str = "examples") -> None:
@@ -40,6 +39,11 @@ def save_text(tensor: Union[torch.Tensor, List[torch.Tensor]],
         fp (string or file object): A filename or a file object.
 
      """
+     try:
+        from transformers import LongformerTokenizerFast
+     except ImportError as exc:
+        raise ImportError("Saving reconstructed text requires the optional dependency 'transformers'.") from exc
+
      bert = "allenai/longformer-base-4096"
      tokenizer = LongformerTokenizerFast.from_pretrained(bert)
      with open(fp, "w", encoding="utf-8") as f:
@@ -49,4 +53,3 @@ def save_text(tensor: Union[torch.Tensor, List[torch.Tensor]],
 
             for text in texts:
                 f.write(text.strip() + "\n")  # Skriv varje text på en egen rad
-
